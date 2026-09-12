@@ -8,7 +8,10 @@
  *   pyrite.goToPythonSource    jump from a Java view line back to the Python source line
  *   pyrite.clearView           delete the generated folder
  *
- * A file watcher keeps the view in sync on save (setting pyrite.watch).
+ * A file watcher keeps the view in sync on save (setting pyrite.watch). A
+ * DefinitionProvider also gives the Java view its own "Go to Definition"
+ * (F12 / Ctrl+Click / right-click), resolved against the sidecar symbol
+ * index built by mirror.ts (see definitionIndex.ts) rather than Python.
  */
 
 import * as fs from 'fs';
@@ -16,6 +19,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { createTranslator, EngineName, Translator } from './translator';
 import { javaLineFor, javaPathFor, mirrorFile, mirrorProject, pythonLineFor, readSourceMap, removeMirroredFile, isExcluded } from './mirror';
+import { buildSymbolIndex, resolveDefinition } from './definitionIndex';
 import { PyriteAboutViewProvider } from './aboutView';
 
 let output: vscode.OutputChannel;
@@ -180,6 +184,29 @@ async function goToPythonSource(): Promise<void> {
   target.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
 }
 
+/**
+ * "Go to Definition" inside the generated Java view: resolves the identifier under the
+ * cursor (a class, method or field name) against the project-wide symbol index and jumps
+ * to where it's declared, in whichever mirrored file that is. Only active inside the
+ * output folder - real Java projects elsewhere in the workspace are left to their own
+ * definition provider.
+ */
+class PyriteDefinitionProvider implements vscode.DefinitionProvider {
+  provideDefinition(document: vscode.TextDocument, position: vscode.Position): vscode.Location[] | undefined {
+    const root = rootFor(document.uri);
+    if (!root || !isInsideOutput(root, document.uri.fsPath)) return undefined;
+    const range = document.getWordRangeAtPosition(position);
+    if (!range) return undefined;
+    const word = document.getText(range);
+    const s = settings();
+    const fromFile = relPath(root, document.uri.fsPath);
+    const index = buildSymbolIndex(root.uri.fsPath, s.outputFolder);
+    const matches = resolveDefinition(index, word, fromFile, position.line);
+    if (!matches.length) return undefined;
+    return matches.map((m) => new vscode.Location(vscode.Uri.file(path.join(root.uri.fsPath, m.javaFile)), new vscode.Position(m.javaLine, 0)));
+  }
+}
+
 async function clearView(): Promise<void> {
   const root = rootFor();
   if (!root) return;
@@ -220,6 +247,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('pyrite.goToPythonSource', () => goToPythonSource()),
     vscode.commands.registerCommand('pyrite.clearView', () => clearView()),
     vscode.window.registerWebviewViewProvider(PyriteAboutViewProvider.viewType, new PyriteAboutViewProvider(context)),
+    vscode.languages.registerDefinitionProvider({ language: 'java' }, new PyriteDefinitionProvider()),
   );
 
   // Keep the view in sync with saves / deletes.

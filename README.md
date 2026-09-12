@@ -39,6 +39,9 @@ my-project/                          my-project/.java-view/
 - **Live sync** – saving a Python file re-translates just that file (`pyrite.watch`).
 - **Two-way navigation** – `Ctrl+Alt+J` jumps from a Python line to the matching
   Java line and back, using a per-file line map.
+- **Go to Definition** – F12 / Ctrl+Click / right-click on a class, method or
+  field name inside the Java view jumps to where it's declared, even in
+  another mirrored file.
 - **`rules` engine**: deterministic, offline, instant. No API key, no network call.
 - **CLI** for CI or quick checks: `npx pyrite <project-root>`.
 

@@ -81,11 +81,41 @@ extension can jump between a Python line and its corresponding Java-view
 line and back (`Ctrl+Alt+J`, commands `pyrite.openJavaView` /
 `pyrite.goToPythonSource`).
 
+## Go to Definition
+
+The rule translator also records every class, method and field it declares
+(`SymbolInfo[]` in `TranslateResult`, one entry per declaration: name, kind,
+enclosing class chain, and the Java/Python lines it came from). `mirror.ts`
+persists that list in the same sidecar JSON as the source map, so
+`definitionIndex.ts` can flatten every generated file's symbols into one
+project-wide index and look an identifier up by name, without touching
+Python at all — the Java view resolves its own definitions independently.
+
+`extension.ts` wires this up as a real `vscode.DefinitionProvider` scoped to
+the output folder, so F12 / Ctrl+Click / right-click → "Go to Definition"
+inside a generated Java file jumps to wherever that class/method/field is
+declared, in whichever mirrored file that is. Since name-only lookup is
+ambiguous when a project has more than one declaration with the same name
+(most commonly: a module's own synthetic wrapper class colliding with a
+same-named Python class inside it, since one file typically exists mostly
+for one class), `resolveDefinition` ranks candidates - a member of the
+class the request came from first, then a "real" nested class over the
+module wrapper, then same-file, then anything else - and returns every
+tied candidate so VS Code can offer a picker instead of guessing wrong.
+
+This only works after the Java view has been generated at least once (like
+`pyrite.goToPythonSource`, it depends on the sidecar maps existing) and is
+best-effort: it resolves by identifier name, not real type inference, so an
+overloaded/shadowed name can still occasionally point at the wrong same-named
+declaration.
+
 ## Surface area
 
 - **Commands**: `pyrite.generateView` (whole workspace or a folder),
   `pyrite.translateCurrentFile`, `pyrite.openJavaView`,
   `pyrite.goToPythonSource`, `pyrite.clearView`.
+- **Go to Definition**: a `DefinitionProvider` inside the generated Java
+  view (F12 / Ctrl+Click / right-click), see above.
 - **Live sync**: saving a `.py` file re-translates just that file when
   `pyrite.watch` is enabled (default on), via a `FileSystemWatcher` in
   `src/extension.ts`.

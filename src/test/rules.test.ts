@@ -139,6 +139,46 @@ class MyError(ValueError):
   contains(out, 'public static class MyError extends IllegalArgumentException {');
 });
 
+test('symbols: classes, methods and fields are recorded for "Go to Definition"', () => {
+  const result = translateWithRules({
+    source: `
+class Repo:
+    def __init__(self, url: str):
+        self.url = url
+
+    def fetch(self):
+        return self.url
+`,
+    relativePath: 'app/repo.py',
+  });
+  const lines = result.java.split('\n');
+  const byName = (name: string) => result.symbols.filter((s) => s.name === name);
+
+  const module = byName('Repo').find((s) => s.container.length === 0);
+  assert.ok(module, 'module class Repo should be recorded');
+  assert.equal(module!.kind, 'class');
+  assert.equal(lines[module!.javaLine], 'public final class Repo {');
+
+  const nestedClass = byName('Repo').find((s) => s.kind === 'class' && s.container.length === 1);
+  assert.ok(nestedClass, 'nested class Repo should be recorded, distinct from the module class');
+  assert.deepEqual(nestedClass!.container, ['Repo']);
+  assert.match(lines[nestedClass!.javaLine], /static class Repo/);
+
+  const ctor = byName('Repo').find((s) => s.kind === 'method');
+  assert.ok(ctor, 'constructor should be recorded as a method named after the class');
+  assert.deepEqual(ctor!.container, ['Repo', 'Repo']);
+
+  const field = byName('url').find((s) => s.kind === 'field');
+  assert.ok(field, 'field url should be recorded');
+  assert.deepEqual(field!.container, ['Repo', 'Repo']);
+  assert.match(lines[field!.javaLine], /String url;/);
+
+  const method = byName('fetch').find((s) => s.kind === 'method');
+  assert.ok(method, 'method fetch should be recorded');
+  assert.match(lines[method!.javaLine], /fetch\(\)/);
+  assert.equal(method!.pythonLine, 6);
+});
+
 test('control flow: if/elif/else, for range, for items, try/except/finally, with, raise', () => {
   const out = java(`
 def f(items, d):
@@ -217,7 +257,7 @@ test('mirror helpers: globs and line lookups', () => {
   assert.ok(globToRegExp('**/node_modules/**').test('a/node_modules/b.py'));
   assert.ok(isExcluded('.venv/lib/x.py', ['**/.venv/**']));
   assert.ok(!isExcluded('src/x.py', ['**/.venv/**']));
-  const map = { python: 'a.py', java: '.java-view/a.java', engine: 'rules', generatedAt: '', lines: [0, 0, 1, 0, 3, 4, 0] };
+  const map = { python: 'a.py', java: '.java-view/a.java', engine: 'rules', generatedAt: '', lines: [0, 0, 1, 0, 3, 4, 0], symbols: [] };
   assert.equal(pythonLineFor(map, 3), 1);
   assert.equal(pythonLineFor(map, 6), 4);
   assert.equal(javaLineFor(map, 3), 4);

@@ -12,6 +12,23 @@ export interface TranslateInput {
   relativePath: string;
 }
 
+export type SymbolKind = 'class' | 'method' | 'field';
+
+export interface SymbolInfo {
+  /** Identifier exactly as it appears in the generated Java text. */
+  name: string;
+  kind: SymbolKind;
+  /**
+   * Enclosing class chain, outermost first (always starts with the module
+   * class). Does not include the symbol's own name for a 'class' entry.
+   */
+  container: string[];
+  /** 0-based line in the generated Java text where this symbol is declared. */
+  javaLine: number;
+  /** 1-based Python source line the declaration was produced from. */
+  pythonLine: number;
+}
+
 export interface TranslateResult {
   /** Generated Java-flavored text. */
   java: string;
@@ -20,6 +37,8 @@ export interface TranslateResult {
    * or 0 when the line is synthetic (closing braces, headers, ...).
    */
   sourceMap: number[];
+  /** Every class, method and field declared in the output, for "Go to Definition". */
+  symbols: SymbolInfo[];
   /** Human-readable notes about constructs that could not be translated faithfully. */
   warnings: string[];
   /** Which engine produced the result. */

@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { TranslateResult, Translator } from './translator';
+import { SymbolInfo, TranslateResult, Translator } from './translator';
 
 export interface MirrorOptions {
   /** Absolute path of the Python project root. */
@@ -41,6 +41,8 @@ export interface SourceMapFile {
   generatedAt: string;
   /** javaLine(0-based) -> pythonLine(1-based) or 0. */
   lines: number[];
+  /** Classes, methods and fields declared in this file, for cross-file "Go to Definition". */
+  symbols: SymbolInfo[];
 }
 
 export const DEFAULT_EXCLUDES = [
@@ -146,6 +148,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     engine: result.engine,
     generatedAt: new Date().toISOString(),
     lines: result.sourceMap,
+    symbols: result.symbols,
   };
   const mapAbs = path.join(outRoot, mapPathFor(relativePython));
   fs.mkdirSync(path.dirname(mapAbs), { recursive: true });

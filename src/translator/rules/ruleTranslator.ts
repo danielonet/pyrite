@@ -20,7 +20,7 @@ import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { boxed, splitTopLevel, translateType } from './typeHints';
 import { indexAtDepth0, mapExceptionName, translateExpression, translateMaskedExpression } from './expressions';
-import { TranslateInput, TranslateResult, Translator, packageFromPath, toPascalCase } from '../types';
+import { SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, packageFromPath, toPascalCase } from '../types';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
 
@@ -40,6 +40,15 @@ interface Block {
 
 interface OutLine {
   text: string;
+  py: number;
+}
+
+/** A recorded declaration, before `javaLineRaw` is rebased onto the final output (see assemble()). */
+interface RawSymbol {
+  name: string;
+  kind: SymbolKind;
+  container: string[];
+  javaLineRaw: number;
   py: number;
 }
 
@@ -125,6 +134,8 @@ class RuleTranslation {
   private skipIndex = -1;
   private readonly moduleClass: string;
   private readonly usedNames = new Set<string>();
+  /** Classes, methods and fields declared so far, for "Go to Definition"; rebased in assemble(). */
+  private readonly symbols: RawSymbol[] = [];
 
   constructor(private readonly input: TranslateInput) {
     this.lines = splitLogicalLines(input.source);
@@ -183,6 +194,20 @@ class RuleTranslation {
 
   private exprCtx() {
     return { className: this.enclosingClass()?.className };
+  }
+
+  /** Enclosing class names, outermost first, always starting with the module class. */
+  private classChain(): string[] {
+    return [this.moduleClass, ...this.stack.filter((b) => b.kind === 'class').map((b) => b.className!)];
+  }
+
+  /**
+   * Record a declaration for "Go to Definition". Call this right after the `emit()` that produced
+   * it, and before pushing a new class block onto the stack (so a class's own `container` reflects
+   * only its enclosing classes, not itself).
+   */
+  private recordSymbol(name: string, kind: SymbolKind, py: number): void {
+    this.symbols.push({ name, kind, container: this.classChain(), javaLineRaw: this.out.length - 1, py });
   }
 
   private expr(pythonExpr: string): string {
@@ -332,9 +357,14 @@ class RuleTranslation {
     // Trim trailing blank lines from body
     while (this.out.length && this.out[this.out.length - 1].text === '') this.out.pop();
     const all = [...header, ...this.out, { text: '}', py: 0 }, { text: '', py: 0 }];
+    const symbols: SymbolInfo[] = [
+      { name: this.moduleClass, kind: 'class', container: [], javaLine: header.length - 1, pythonLine: 1 },
+      ...this.symbols.map((s) => ({ name: s.name, kind: s.kind, container: s.container, javaLine: header.length + s.javaLineRaw, pythonLine: s.py })),
+    ];
     return {
       java: all.map((l) => l.text).join('\n'),
       sourceMap: all.map((l) => l.py),
+      symbols,
       warnings: this.warnings,
       engine: 'rules',
     };
@@ -546,6 +576,7 @@ class RuleTranslation {
     }
     this.emit(`${header} {${comment}`, py);
     this.usedNames.add(name);
+    this.recordSymbol(name, 'class', py);
 
     const block: Block = { indent: line.indent, kind: 'class', className: name, isEnum, isRecord, isInterface };
     this.stack.push(block);
@@ -563,6 +594,7 @@ class RuleTranslation {
       for (const f of toEmit) {
         const visibility = f.name.startsWith('_') ? 'private' : 'public';
         this.emit(`${visibility} ${f.type} ${f.name}; // assigned as self.${f.name} in ${f.where}`, f.py);
+        this.recordSymbol(f.name, 'field', f.py);
       }
       if (toEmit.length) this.emit('', 0, 0);
     }
@@ -701,6 +733,7 @@ class RuleTranslation {
     const signature = `${modifiers.join(' ')}${modifiers.length ? ' ' : ''}${isCtor ? '' : `${ret} `}${javaName}(${params.join(', ')})`;
     const body = isAbstract || cls?.isInterface ? ';' : ' {';
     this.emit(`${signature}${body}${comment}`, py);
+    this.recordSymbol(javaName, 'method', py);
 
     if (body === ';') {
       // No block for abstract methods: consume the body (usually `...` or `pass`)
@@ -1041,11 +1074,13 @@ class RuleTranslation {
       const isConst = /^[A-Z][A-Z0-9_]*$/.test(name);
       const t = type === 'var' ? 'Object' : type;
       this.emit(`${isConst ? 'public static final' : 'static'} ${t} ${name}${rhs};${comment}`, py);
+      this.recordSymbol(name, 'field', py);
       return;
     }
     if (scope.kind === 'class') {
       if (scope.isEnum) {
         this.emit(`${name}${valueJava !== undefined ? `(${valueJava})` : ''},${comment}`, py);
+        this.recordSymbol(name, 'field', py);
         return;
       }
       const t = type === 'var' ? 'Object' : type;
@@ -1054,6 +1089,7 @@ class RuleTranslation {
       const modifiers = scope.isRecord ? [visibility] : [visibility, 'static', ...(isConst ? ['final'] : [])];
       if (scope.isInterface) modifiers.length = 0;
       this.emit(`${modifiers.join(' ')}${modifiers.length ? ' ' : ''}${t} ${name}${rhs};${comment}`, py);
+      this.recordSymbol(name, 'field', py);
       return;
     }
     // function scope
