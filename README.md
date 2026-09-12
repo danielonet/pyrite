@@ -39,12 +39,13 @@ my-project/                          my-project/.java-view/
 - **Live sync** – saving a Python file re-translates just that file (`pyrite.watch`).
 - **Two-way navigation** – `Ctrl+Alt+J` jumps from a Python line to the matching
   Java line and back, using a per-file line map.
-- **Two engines**
-  - `rules` (default): deterministic, offline, instant. No API key.
-  - `llm`: Claude produces a more idiomatic view. Needs an API key
-    (*Pyrite: Set LLM API Key*, stored in VS Code secret storage) or `ANTHROPIC_API_KEY`.
-    Falls back to the rules engine per file on any error.
+- **`rules` engine**: deterministic, offline, instant. No API key, no network call.
 - **CLI** for CI or quick checks: `npx pyrite <project-root>`.
+
+See [architecture/](architecture/) for design notes, including
+[architecture/llm-engine.md](architecture/llm-engine.md): a second, LLM-backed
+engine used to live here and was pulled out to keep Pyrite offline and
+deterministic; its design is preserved there rather than deleted.
 
 ## What the rules engine does
 
@@ -88,23 +89,18 @@ To build an installable package: `npx @vscode/vsce package` (produces a `.vsix`)
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `pyrite.engine` | `rules` | `rules` or `llm` |
+| `pyrite.engine` | `rules` | translation engine (`rules` is the only one today) |
 | `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root) |
 | `pyrite.exclude` | venv, node_modules, ... | glob patterns to skip |
 | `pyrite.watch` | `true` | re-translate on save |
-| `pyrite.llm.model` | `claude-opus-5` | model for the LLM engine |
-| `pyrite.llm.effort` | `medium` | `low` / `medium` / `high` |
-| `pyrite.llm.fallbackToRules` | `true` | use the rules engine when the LLM call fails |
 
 The generated folder contains its own `.gitignore` so it is never committed.
 
 ## Roadmap (Phase 2: edit the Java view, sync back)
 
-Not implemented yet. The intended design is function-level and approval-gated:
-detect which methods changed in the Java view, ask the LLM to translate only
-those back to Python using the original Python as context, and show the
-resulting Python diff for review before writing. A whole-file round trip is
-lossy and would produce noisy diffs, so it is deliberately avoided.
+Not implemented yet. See [architecture/phase-2.md](architecture/phase-2.md)
+for the intended design (function-level, approval-gated, LLM-translated with
+the original Python as context) and open questions.
 
 ## Limitations
 

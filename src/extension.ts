@@ -7,7 +7,6 @@
  *   pyrite.openJavaView        jump from a Python file/line to the matching Java view line
  *   pyrite.goToPythonSource    jump from a Java view line back to the Python source line
  *   pyrite.clearView           delete the generated folder
- *   pyrite.setApiKey           store the LLM API key in VS Code's secret storage
  *
  * A file watcher keeps the view in sync on save (setting pyrite.watch).
  */
@@ -17,8 +16,8 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { createTranslator, EngineName, Translator } from './translator';
 import { javaLineFor, javaPathFor, mirrorFile, mirrorProject, pythonLineFor, readSourceMap, removeMirroredFile, isExcluded } from './mirror';
+import { PyriteAboutViewProvider } from './aboutView';
 
-const SECRET_KEY = 'pyrite.llm.apiKey';
 let output: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
 
@@ -27,7 +26,6 @@ interface Settings {
   outputFolder: string;
   exclude: string[];
   watch: boolean;
-  llm: { model: string; effort: 'low' | 'medium' | 'high'; fallbackToRules: boolean };
 }
 
 function settings(): Settings {
@@ -37,18 +35,12 @@ function settings(): Settings {
     outputFolder: cfg.get<string>('outputFolder', '.java-view'),
     exclude: cfg.get<string[]>('exclude', []),
     watch: cfg.get<boolean>('watch', true),
-    llm: {
-      model: cfg.get<string>('llm.model', 'claude-opus-5'),
-      effort: cfg.get<'low' | 'medium' | 'high'>('llm.effort', 'medium'),
-      fallbackToRules: cfg.get<boolean>('llm.fallbackToRules', true),
-    },
   };
 }
 
-async function buildTranslator(context: vscode.ExtensionContext): Promise<Translator> {
+function buildTranslator(): Translator {
   const s = settings();
-  const apiKey = s.engine === 'llm' ? (await context.secrets.get(SECRET_KEY)) ?? process.env.ANTHROPIC_API_KEY : undefined;
-  const { translator, note } = createTranslator({ engine: s.engine, llm: { apiKey, ...s.llm } });
+  const { translator, note } = createTranslator({ engine: s.engine });
   if (note) {
     output.appendLine(note);
     void vscode.window.showWarningMessage(note);
@@ -75,14 +67,14 @@ function isInsideOutput(root: vscode.WorkspaceFolder, abs: string): boolean {
   return !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
-async function generateView(context: vscode.ExtensionContext, folderUri?: vscode.Uri): Promise<void> {
+async function generateView(folderUri?: vscode.Uri): Promise<void> {
   const root = rootFor(folderUri);
   if (!root) {
     void vscode.window.showErrorMessage('Pyrite: open a folder first.');
     return;
   }
   const s = settings();
-  const translator = await buildTranslator(context);
+  const translator = buildTranslator();
   const scopeRoot = folderUri && fs.statSync(folderUri.fsPath).isDirectory() ? folderUri.fsPath : root.uri.fsPath;
 
   await vscode.window.withProgress(
@@ -114,14 +106,14 @@ async function generateView(context: vscode.ExtensionContext, folderUri?: vscode
   );
 }
 
-async function translateOne(context: vscode.ExtensionContext, pyUri: vscode.Uri, reveal: boolean): Promise<vscode.Uri | undefined> {
+async function translateOne(pyUri: vscode.Uri, reveal: boolean): Promise<vscode.Uri | undefined> {
   const root = rootFor(pyUri);
   if (!root) return undefined;
   if (isInsideOutput(root, pyUri.fsPath)) return undefined;
   const s = settings();
   const rel = relPath(root, pyUri.fsPath);
   if (isExcluded(rel, s.exclude)) return undefined;
-  const translator = await buildTranslator(context);
+  const translator = buildTranslator();
   statusItem.text = '$(sync~spin) Pyrite';
   statusItem.show();
   try {
@@ -142,7 +134,7 @@ async function translateOne(context: vscode.ExtensionContext, pyUri: vscode.Uri,
   }
 }
 
-async function openJavaView(context: vscode.ExtensionContext): Promise<void> {
+async function openJavaView(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'python') {
     void vscode.window.showInformationMessage('Pyrite: open a Python file first.');
@@ -154,7 +146,7 @@ async function openJavaView(context: vscode.ExtensionContext): Promise<void> {
   const s = settings();
   const rel = relPath(root, editor.document.uri.fsPath);
   const javaAbs = path.join(root.uri.fsPath, s.outputFolder, javaPathFor(rel));
-  const javaUri = fs.existsSync(javaAbs) ? vscode.Uri.file(javaAbs) : await translateOne(context, editor.document.uri, false);
+  const javaUri = fs.existsSync(javaAbs) ? vscode.Uri.file(javaAbs) : await translateOne(editor.document.uri, false);
   if (!javaUri) return;
   const map = readSourceMap(root.uri.fsPath, javaUri.fsPath, s.outputFolder);
   const line = map ? javaLineFor(map, editor.selection.active.line + 1) : 0;
@@ -203,29 +195,6 @@ async function clearView(): Promise<void> {
   void vscode.window.showInformationMessage(`Pyrite: deleted ${s.outputFolder}/.`);
 }
 
-async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
-  const key = await vscode.window.showInputBox({
-    prompt: 'Anthropic API key for the Pyrite LLM engine (stored in VS Code secret storage)',
-    password: true,
-    ignoreFocusOut: true,
-    placeHolder: 'sk-ant-...',
-  });
-  if (key === undefined) return;
-  if (key.trim() === '') {
-    await context.secrets.delete(SECRET_KEY);
-    void vscode.window.showInformationMessage('Pyrite: API key removed.');
-    return;
-  }
-  await context.secrets.store(SECRET_KEY, key.trim());
-  const cfg = vscode.workspace.getConfiguration('pyrite');
-  if (cfg.get<string>('engine') !== 'llm') {
-    const pick = await vscode.window.showInformationMessage('Pyrite: API key saved. Switch the engine to "llm"?', 'Yes', 'No');
-    if (pick === 'Yes') await cfg.update('engine', 'llm', vscode.ConfigurationTarget.Workspace);
-  } else {
-    void vscode.window.showInformationMessage('Pyrite: API key saved.');
-  }
-}
-
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('Pyrite');
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
@@ -237,7 +206,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     output,
     statusItem,
-    vscode.commands.registerCommand('pyrite.generateView', (uri?: vscode.Uri) => generateView(context, uri)),
+    vscode.commands.registerCommand('pyrite.generateView', (uri?: vscode.Uri) => generateView(uri)),
     vscode.commands.registerCommand('pyrite.translateCurrentFile', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.languageId !== 'python') {
@@ -245,12 +214,12 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       if (editor.document.isDirty) await editor.document.save();
-      await translateOne(context, editor.document.uri, true);
+      await translateOne(editor.document.uri, true);
     }),
-    vscode.commands.registerCommand('pyrite.openJavaView', () => openJavaView(context)),
+    vscode.commands.registerCommand('pyrite.openJavaView', () => openJavaView()),
     vscode.commands.registerCommand('pyrite.goToPythonSource', () => goToPythonSource()),
     vscode.commands.registerCommand('pyrite.clearView', () => clearView()),
-    vscode.commands.registerCommand('pyrite.setApiKey', () => setApiKey(context)),
+    vscode.window.registerWebviewViewProvider(PyriteAboutViewProvider.viewType, new PyriteAboutViewProvider(context)),
   );
 
   // Keep the view in sync with saves / deletes.
@@ -261,7 +230,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!root) return;
     const outDir = path.join(root.uri.fsPath, settings().outputFolder);
     if (!fs.existsSync(outDir)) return; // the user has not generated a view yet - stay quiet
-    await translateOne(context, uri, false);
+    await translateOne(uri, false);
   };
   context.subscriptions.push(
     watcher,

@@ -27,6 +27,24 @@
     "pyrite": "./out/cli.js"
   },
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pyrite",
+          "title": "Pyrite",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "pyrite": [
+        {
+          "id": "pyrite.about",
+          "name": "About",
+          "type": "webview"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "pyrite.generateView",
@@ -47,10 +65,6 @@
       {
         "command": "pyrite.clearView",
         "title": "Pyrite: Delete Generated Java View"
-      },
-      {
-        "command": "pyrite.setApiKey",
-        "title": "Pyrite: Set LLM API Key"
       }
     ],
     "menus": {
@@ -94,12 +108,10 @@
         "pyrite.engine": {
           "type": "string",
           "enum": [
-            "rules",
-            "llm"
+            "rules"
           ],
           "enumDescriptions": [
-            "Deterministic rule-based translator. Fast, offline, no API key. Best-effort Java syntax.",
-            "LLM translator (Claude). Produces more idiomatic Java-flavored output; requires an API key."
+            "Deterministic rule-based translator. Fast, offline, no API key. Best-effort Java syntax."
           ],
           "default": "rules",
           "description": "Translation engine used to produce the Java view."
@@ -129,26 +141,6 @@
           "type": "boolean",
           "default": true,
           "description": "Re-translate a Python file automatically whenever it is saved."
-        },
-        "pyrite.llm.model": {
-          "type": "string",
-          "default": "claude-opus-5",
-          "description": "Claude model ID used by the LLM engine."
-        },
-        "pyrite.llm.effort": {
-          "type": "string",
-          "enum": [
-            "low",
-            "medium",
-            "high"
-          ],
-          "default": "medium",
-          "description": "Reasoning effort for the LLM engine. Lower is faster and cheaper."
-        },
-        "pyrite.llm.fallbackToRules": {
-          "type": "boolean",
-          "default": true,
-          "description": "If the LLM call fails (no key, network error, refusal), fall back to the rule-based translator for that file."
         }
       }
     }
@@ -166,8 +158,5 @@
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.5.0"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.125.0"
   }
 }

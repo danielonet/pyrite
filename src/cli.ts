@@ -2,7 +2,7 @@
 /**
  * Command-line entry point, useful without VS Code (CI, quick experiments).
  *
- *   pyrite <project-root> [--out .java-view] [--engine rules|llm] [--model claude-opus-5] [--effort low|medium|high]
+ *   pyrite <project-root> [--out .java-view]
  *   pyrite --file path/to/module.py            # print the Java view of one file to stdout
  */
 
@@ -16,8 +16,6 @@ interface Args {
   file?: string;
   out: string;
   engine: EngineName;
-  model?: string;
-  effort?: 'low' | 'medium' | 'high';
   quiet: boolean;
 }
 
@@ -27,9 +25,6 @@ function parseArgs(argv: string[]): Args {
     const a = argv[i];
     const next = () => argv[++i];
     if (a === '--out') args.out = next();
-    else if (a === '--engine') args.engine = next() as EngineName;
-    else if (a === '--model') args.model = next();
-    else if (a === '--effort') args.effort = next() as Args['effort'];
     else if (a === '--file') args.file = next();
     else if (a === '--quiet' || a === '-q') args.quiet = true;
     else if (a === '--help' || a === '-h') {
@@ -47,16 +42,13 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--engine rules|llm] [--model <id>] [--effort low|medium|high] [--quiet]
-  pyrite --file <module.py> [--engine rules|llm]
-
-Environment:
-  ANTHROPIC_API_KEY   API key for the llm engine.`);
+  pyrite <project-root> [--out .java-view] [--quiet]
+  pyrite --file <module.py>`);
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const { translator, note } = createTranslator({ engine: args.engine, llm: { model: args.model, effort: args.effort } });
+  const { translator, note } = createTranslator({ engine: args.engine });
   if (note) console.error(`note: ${note}`);
 
   if (args.file) {

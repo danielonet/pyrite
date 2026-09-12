@@ -8,7 +8,6 @@ import { translateWithRules } from '../translator/rules/ruleTranslator';
 import { translateExpression } from '../translator/rules/expressions';
 import { translateType } from '../translator/rules/typeHints';
 import { splitLogicalLines } from '../translator/rules/logicalLines';
-import { parseModelOutput } from '../translator/llm/llmTranslator';
 import { globToRegExp, isExcluded, javaLineFor, pythonLineFor } from '../mirror';
 
 function java(source: string, relativePath = 'pkg/mod.py'): string {
@@ -212,15 +211,6 @@ test('source map points generated lines at Python lines', () => {
   const retIdx = lines.findIndex((l) => l.includes('return 1;'));
   assert.equal(result.sourceMap[retIdx], 4);
   assert.equal(result.sourceMap.length, lines.length);
-});
-
-test('LLM output parsing strips py markers into a sparse map', () => {
-  const parsed = parseModelOutput('public final class M { // py:1\n    void f() { // py:3\n        int x = 1;\n    }\n}', { source: '', relativePath: 'm.py' });
-  assert.ok(!parsed.java.includes('py:'));
-  const lines = parsed.java.split('\n');
-  const fIdx = lines.findIndex((l) => l.includes('void f()'));
-  assert.equal(parsed.sourceMap[fIdx], 3);
-  assert.equal(parsed.sourceMap[fIdx + 1], 3); // inherits nearest marker
 });
 
 test('mirror helpers: globs and line lookups', () => {

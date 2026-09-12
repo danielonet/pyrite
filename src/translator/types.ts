@@ -23,11 +23,11 @@ export interface TranslateResult {
   /** Human-readable notes about constructs that could not be translated faithfully. */
   warnings: string[];
   /** Which engine produced the result. */
-  engine: 'rules' | 'llm';
+  engine: 'rules';
 }
 
 export interface Translator {
-  readonly name: 'rules' | 'llm';
+  readonly name: 'rules';
   translate(input: TranslateInput): Promise<TranslateResult>;
 }
 
