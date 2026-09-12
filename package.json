@@ -1,0 +1,171 @@
+{
+  "name": "pyrite",
+  "displayName": "Pyrite",
+  "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
+  "version": "0.1.0",
+  "publisher": "danielonet",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "python",
+    "java",
+    "translate",
+    "transpile",
+    "read-only view"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/*.py"
+  ],
+  "main": "./out/extension.js",
+  "bin": {
+    "pyrite": "./out/cli.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "pyrite.generateView",
+        "title": "Pyrite: Generate Java View for Workspace"
+      },
+      {
+        "command": "pyrite.translateCurrentFile",
+        "title": "Pyrite: Translate Current Python File"
+      },
+      {
+        "command": "pyrite.openJavaView",
+        "title": "Pyrite: Open Java View of This File"
+      },
+      {
+        "command": "pyrite.goToPythonSource",
+        "title": "Pyrite: Go to Python Source"
+      },
+      {
+        "command": "pyrite.clearView",
+        "title": "Pyrite: Delete Generated Java View"
+      },
+      {
+        "command": "pyrite.setApiKey",
+        "title": "Pyrite: Set LLM API Key"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "pyrite.openJavaView",
+          "when": "resourceLangId == python",
+          "group": "navigation@9"
+        },
+        {
+          "command": "pyrite.goToPythonSource",
+          "when": "resourceLangId == java && resourcePath =~ /[\\\\/]\\.java-view[\\\\/]/",
+          "group": "navigation@9"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "pyrite.generateView",
+          "when": "explorerResourceIsFolder",
+          "group": "7_modification"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "pyrite.openJavaView",
+        "key": "ctrl+alt+j",
+        "mac": "cmd+alt+j",
+        "when": "editorLangId == python"
+      },
+      {
+        "command": "pyrite.goToPythonSource",
+        "key": "ctrl+alt+j",
+        "mac": "cmd+alt+j",
+        "when": "editorLangId == java"
+      }
+    ],
+    "configuration": {
+      "title": "Pyrite",
+      "properties": {
+        "pyrite.engine": {
+          "type": "string",
+          "enum": [
+            "rules",
+            "llm"
+          ],
+          "enumDescriptions": [
+            "Deterministic rule-based translator. Fast, offline, no API key. Best-effort Java syntax.",
+            "LLM translator (Claude). Produces more idiomatic Java-flavored output; requires an API key."
+          ],
+          "default": "rules",
+          "description": "Translation engine used to produce the Java view."
+        },
+        "pyrite.outputFolder": {
+          "type": "string",
+          "default": ".java-view",
+          "description": "Folder (relative to the workspace root) where the mirrored Java view is written."
+        },
+        "pyrite.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/.venv/**",
+            "**/venv/**",
+            "**/__pycache__/**",
+            "**/site-packages/**",
+            "**/.java-view/**"
+          ],
+          "description": "Glob patterns excluded from translation."
+        },
+        "pyrite.watch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-translate a Python file automatically whenever it is saved."
+        },
+        "pyrite.llm.model": {
+          "type": "string",
+          "default": "claude-opus-5",
+          "description": "Claude model ID used by the LLM engine."
+        },
+        "pyrite.llm.effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "medium",
+          "description": "Reasoning effort for the LLM engine. Lower is faster and cheaper."
+        },
+        "pyrite.llm.fallbackToRules": {
+          "type": "boolean",
+          "default": true,
+          "description": "If the LLM call fails (no key, network error, refusal), fall back to the rule-based translator for that file."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test \"out/test/**/*.test.js\"",
+    "cli": "node out/cli.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0"
+  }
+}
