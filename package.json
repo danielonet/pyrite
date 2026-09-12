@@ -158,7 +158,9 @@
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test \"out/test/**/*.test.js\"",
     "cli": "node out/cli.js",
-    "package": "vsce package"
+    "package": "vsce package",
+    "install:local": "bash scripts/build-and-install.sh",
+    "uninstall:local": "bash scripts/uninstall.sh"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
