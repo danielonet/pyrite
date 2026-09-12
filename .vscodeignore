@@ -9,3 +9,4 @@ out/test/**
 tsconfig.json
 sample-python-project/**
 .gitignore
+.nvmrc

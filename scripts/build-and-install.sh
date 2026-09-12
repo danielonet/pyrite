@@ -16,6 +16,38 @@ cd "$ROOT_DIR"
 
 echo "==> Working in $ROOT_DIR"
 
+# 0. @vscode/vsce (and its dependencies, e.g. @azure/identity) require
+#    Node >= 20. If the shell that invoked this script resolved an older
+#    system Node (common in a fresh terminal that hasn't sourced nvm, or a
+#    non-interactive runner), try to pick up nvm and switch to a Node that
+#    satisfies REQUIRED_NODE_MAJOR before it gets used below.
+REQUIRED_NODE_MAJOR=20
+node_major() { node -e 'console.log(process.versions.node.split(".")[0])'; }
+
+if [ "$(node_major)" -lt "$REQUIRED_NODE_MAJOR" ]; then
+  echo "==> Node $(node -v) is too old for @vscode/vsce (needs >= $REQUIRED_NODE_MAJOR); looking for nvm..."
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    \. "$NVM_DIR/nvm.sh"
+    if [ -f "$ROOT_DIR/.nvmrc" ]; then
+      nvm install >/dev/null
+      nvm use >/dev/null
+    else
+      nvm install "$REQUIRED_NODE_MAJOR" >/dev/null
+      nvm use "$REQUIRED_NODE_MAJOR" >/dev/null
+    fi
+    echo "==> Switched to Node $(node -v) via nvm"
+  fi
+
+  if [ "$(node_major)" -lt "$REQUIRED_NODE_MAJOR" ]; then
+    echo "!! Still on Node $(node -v). Install nvm (https://github.com/nvm-sh/nvm)" >&2
+    echo "   and run: nvm install $REQUIRED_NODE_MAJOR" >&2
+    echo "   then re-run this script." >&2
+    exit 1
+  fi
+fi
+
 # 1. Install dependencies if needed.
 if [ ! -d node_modules ]; then
   echo "==> Installing npm dependencies..."
