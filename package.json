@@ -2,7 +2,7 @@
   "name": "pyrite",
   "displayName": "Pyrite",
   "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "danielonnet",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -146,6 +146,26 @@
           "type": "boolean",
           "default": true,
           "description": "Re-translate a Python file automatically whenever it is saved."
+        },
+        "pyrite.javadoc": {
+          "type": "string",
+          "enum": [
+            "always",
+            "docstringOnly",
+            "none"
+          ],
+          "enumDescriptions": [
+            "Always generate Javadoc for every class and method. When there is no docstring, the description is extrapolated from the name and @param/@return from the signature.",
+            "Only generate Javadoc for a class or method that has documentation in the Python code (still adding @param/@return); everything else gets no Javadoc. (default)",
+            "Never generate Javadoc. Docstrings are kept as plain comments instead, like any other construct without a clean Java equivalent."
+          ],
+          "default": "docstringOnly",
+          "description": "How much Javadoc to generate for classes and methods in the Java view."
+        },
+        "pyrite.javadocTestCode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Document test code. When unchecked (default), test files (test_*.py, *_test.py, conftest.py, or anything under a test/tests folder) never get Javadoc. When checked, test code follows the same pyrite.javadoc rules as production code."
         }
       }
     }

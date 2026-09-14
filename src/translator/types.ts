@@ -5,11 +5,31 @@
  * The output is not required to compile; it is meant to be read by Java developers.
  */
 
+/**
+ * How much Javadoc the rules engine should generate for classes and methods:
+ *  - "always": every class/method gets a Javadoc comment; when there is no docstring
+ *    the description is extrapolated from the name and `@param`/`@return` are always
+ *    extrapolated from the signature.
+ *  - "docstringOnly": only classes/methods that have a Python docstring get a Javadoc
+ *    comment (still with `@param`/`@return` added); everything else gets none.
+ *  - "none": no Javadoc is generated; a docstring is kept as a plain `/* ... *\/` comment
+ *    in place instead, like any other construct without a clean Java equivalent.
+ */
+export type JavadocMode = 'always' | 'docstringOnly' | 'none';
+
 export interface TranslateInput {
   /** Full Python source text. */
   source: string;
   /** Path of the file relative to the mirrored root, using forward slashes (e.g. "app/services/order_service.py"). */
   relativePath: string;
+  /** Javadoc generation mode. Defaults to "docstringOnly". */
+  javadocMode?: JavadocMode;
+  /**
+   * Whether test code (by common pytest/unittest path conventions - see `isTestFile`)
+   * follows the same `javadocMode` as production code. Defaults to false, meaning test
+   * files never get Javadoc regardless of `javadocMode`.
+   */
+  documentTestCode?: boolean;
 }
 
 export type SymbolKind = 'class' | 'method' | 'field';

@@ -253,6 +253,97 @@ test('source map points generated lines at Python lines', () => {
   assert.equal(result.sourceMap.length, lines.length);
 });
 
+test('javadoc: "always" mode generates for undocumented members too, docstrings copied, @param/@return always extrapolated', () => {
+  const src = `class Point:
+    """A 2D point."""
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def is_valid(self):
+        return self.x is not None
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', javadocMode: 'always' }).java;
+  contains(out, '/** A 2D point. */\n    public static class Point {');
+  contains(out, '         * Constructs a new Point.\n         *\n         * @param x the x\n         * @param y the y\n         */');
+  contains(out, '         * Returns whether valid.\n         *\n         * @return true if valid, false otherwise\n         */');
+});
+
+test('javadoc: "docstringOnly" mode skips undocumented members but still documents and tags the rest', () => {
+  const src = `class Point:
+    """A 2D point."""
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def is_valid(self):
+        return self.x is not None
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', javadocMode: 'docstringOnly' }).java;
+  contains(out, '/** A 2D point. */\n    public static class Point {');
+  assert.ok(!out.includes('Constructs a new Point'), `constructor should not get a generated Javadoc:\n${out}`);
+  assert.ok(!out.includes('Returns whether valid'), `is_valid() should not get a generated Javadoc:\n${out}`);
+  contains(out, 'public Point(Object x, Object y) {');
+  contains(out, 'public Object is_valid() {');
+});
+
+test('javadoc: defaults to "docstringOnly" when javadocMode is not specified', () => {
+  const src = `class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+`;
+  const out = java(src);
+  assert.ok(!out.includes('/**'), `expected no generated Javadoc by default:\n${out}`);
+});
+
+test('javadoc: test code is never documented by default, even with a docstring and javadocMode "always"', () => {
+  const src = `class TestPoint:
+    """Tests for Point."""
+    def test_addition(self):
+        """Checks that addition works."""
+        assert 1 + 1 == 2
+`;
+  for (const relativePath of ['pkg/tests/test_point.py', 'pkg/test_point.py', 'pkg/point_test.py', 'pkg/conftest.py']) {
+    const out = translateWithRules({ source: src, relativePath, javadocMode: 'always' }).java;
+    assert.ok(!out.includes('/**'), `expected no Javadoc for test file ${relativePath}:\n${out}`);
+    contains(out, '/* Tests for Point. */');
+  }
+});
+
+test('javadoc: "javadocTestCode: true" makes test code follow the same javadocMode as production code', () => {
+  const src = `class TestPoint:
+    """Tests for Point."""
+    def test_addition(self):
+        assert 1 + 1 == 2
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/tests/test_point.py', javadocMode: 'always', documentTestCode: true }).java;
+  contains(out, '/** Tests for Point. */');
+  contains(out, 'Tests addition.');
+});
+
+test('javadoc: non-test code is unaffected by documentTestCode', () => {
+  const src = `class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/point.py', javadocMode: 'always', documentTestCode: false }).java;
+  contains(out, 'Constructs a new Point.');
+});
+
+test('javadoc: "none" mode emits no Javadoc; docstrings fall back to a plain comment', () => {
+  const src = `class Point:
+    """A 2D point."""
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', javadocMode: 'none' }).java;
+  assert.ok(!out.includes('/**'), `expected no Javadoc block:\n${out}`);
+  contains(out, '/* A 2D point. */\n        public Point(Object x, Object y) {');
+});
+
 test('mirror helpers: globs and line lookups', () => {
   assert.ok(globToRegExp('**/node_modules/**').test('a/node_modules/b.py'));
   assert.ok(isExcluded('.venv/lib/x.py', ['**/.venv/**']));

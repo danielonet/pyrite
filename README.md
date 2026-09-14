@@ -96,6 +96,8 @@ To build an installable package: `npx @vscode/vsce package` (produces a `.vsix`)
 | `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root) |
 | `pyrite.exclude` | venv, node_modules, ... | glob patterns to skip |
 | `pyrite.watch` | `true` | re-translate on save |
+| `pyrite.javadoc` | `docstringOnly` | Javadoc generation: `always` (every class/method, extrapolated when there's no docstring), `docstringOnly` (only where a docstring exists), or `none` (no Javadoc; docstrings kept as plain comments) |
+| `pyrite.javadocTestCode` | `false` | Document test code too, using the same `pyrite.javadoc` rules as production code. When unchecked, test files (`test_*.py`, `*_test.py`, `conftest.py`, or anything under a `test`/`tests` folder) never get Javadoc |
 
 The generated folder contains its own `.gitignore` so it is never committed.
 

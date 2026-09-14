@@ -17,7 +17,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { createTranslator, EngineName, Translator } from './translator';
+import { createTranslator, EngineName, JavadocMode, Translator } from './translator';
 import { javaLineFor, javaPathFor, mirrorFile, mirrorProject, pythonLineFor, readSourceMap, removeMirroredFile, isExcluded } from './mirror';
 import { buildSymbolIndex, resolveDefinition } from './definitionIndex';
 import { PyriteAboutViewProvider } from './aboutView';
@@ -30,6 +30,8 @@ interface Settings {
   outputFolder: string;
   exclude: string[];
   watch: boolean;
+  javadoc: JavadocMode;
+  javadocTestCode: boolean;
 }
 
 function settings(): Settings {
@@ -39,6 +41,8 @@ function settings(): Settings {
     outputFolder: cfg.get<string>('outputFolder', '.java-view'),
     exclude: cfg.get<string[]>('exclude', []),
     watch: cfg.get<boolean>('watch', true),
+    javadoc: cfg.get<JavadocMode>('javadoc', 'docstringOnly'),
+    javadocTestCode: cfg.get<boolean>('javadocTestCode', false),
   };
 }
 
@@ -90,6 +94,8 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
         root: root.uri.fsPath,
         outputFolder: s.outputFolder,
         exclude: [...s.exclude, ...(scopeRoot !== root.uri.fsPath ? [] : [])],
+        javadocMode: s.javadoc,
+        documentTestCode: s.javadocTestCode,
         isCancelled: () => token.isCancellationRequested,
         onProgress: (rel, i, total) => {
           if (scopeRoot !== root.uri.fsPath && !path.join(root.uri.fsPath, rel).startsWith(scopeRoot)) return;
@@ -121,7 +127,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean): Promise<vscode.
   statusItem.text = '$(sync~spin) Pyrite';
   statusItem.show();
   try {
-    const { javaAbs, result } = await mirrorFile(translator, root.uri.fsPath, rel, s.outputFolder);
+    const { javaAbs, result } = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode });
     for (const w of result.warnings) output.appendLine(`warning: ${w}`);
     const javaUri = vscode.Uri.file(javaAbs);
     if (reveal) {

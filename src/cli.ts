@@ -8,24 +8,36 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { createTranslator, EngineName } from './translator';
+import { createTranslator, EngineName, JavadocMode } from './translator';
 import { DEFAULT_EXCLUDES, mirrorProject } from './mirror';
+
+const JAVADOC_MODES: JavadocMode[] = ['always', 'docstringOnly', 'none'];
 
 interface Args {
   root?: string;
   file?: string;
   out: string;
   engine: EngineName;
+  javadoc: JavadocMode;
+  javadocTestCode: boolean;
   quiet: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { out: '.java-view', engine: 'rules', quiet: false };
+  const args: Args = { out: '.java-view', engine: 'rules', javadoc: 'docstringOnly', javadocTestCode: false, quiet: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const next = () => argv[++i];
     if (a === '--out') args.out = next();
     else if (a === '--file') args.file = next();
+    else if (a === '--javadoc') {
+      const value = next();
+      if (!JAVADOC_MODES.includes(value as JavadocMode)) {
+        console.error(`Invalid --javadoc value: ${value} (expected one of: ${JAVADOC_MODES.join(', ')})`);
+        process.exit(2);
+      }
+      args.javadoc = value as JavadocMode;
+    } else if (a === '--javadoc-test-code') args.javadocTestCode = true;
     else if (a === '--quiet' || a === '-q') args.quiet = true;
     else if (a === '--help' || a === '-h') {
       printUsage();
@@ -42,8 +54,10 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--quiet]
-  pyrite --file <module.py>`);
+  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--quiet]
+  pyrite --file <module.py> [--javadoc always|docstringOnly|none] [--javadoc-test-code]
+
+  --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).`);
 }
 
 async function main(): Promise<void> {
@@ -54,7 +68,7 @@ async function main(): Promise<void> {
   if (args.file) {
     const abs = path.resolve(args.file);
     const source = fs.readFileSync(abs, 'utf8');
-    const result = await translator.translate({ source, relativePath: path.basename(abs) });
+    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode });
     process.stdout.write(result.java);
     for (const w of result.warnings) console.error(`warning: ${w}`);
     return;
@@ -73,6 +87,8 @@ async function main(): Promise<void> {
     root,
     outputFolder: args.out,
     exclude: DEFAULT_EXCLUDES,
+    javadocMode: args.javadoc,
+    documentTestCode: args.javadocTestCode,
     onProgress: (rel, i, total) => {
       if (!args.quiet) console.error(`[${i + 1}/${total}] ${rel}`);
     },

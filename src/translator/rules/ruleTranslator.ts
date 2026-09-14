@@ -20,7 +20,8 @@ import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { boxed, splitTopLevel, translateType } from './typeHints';
 import { indexAtDepth0, mapExceptionName, translateExpression, translateMaskedExpression } from './expressions';
-import { SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, packageFromPath, toPascalCase } from '../types';
+import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, packageFromPath, toPascalCase } from '../types';
+import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
 
@@ -56,31 +57,31 @@ const ENUM_BASES = new Set(['Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag']);
 const RECORD_BASES = new Set(['NamedTuple', 'TypedDict', 'BaseModel', 'BaseSettings']);
 const RECORD_DECORATORS = /^@(dataclass|dataclasses\.dataclass|attr\.s|attrs\.define|define|frozen|pydantic\.dataclasses\.dataclass)\b/;
 
-const DUNDER_METHODS: Record<string, { name: string; ret: string; params?: string }> = {
-  __str__: { name: 'toString', ret: 'String' },
-  __repr__: { name: 'toString /* __repr__ */', ret: 'String' },
-  __eq__: { name: 'equals', ret: 'boolean' },
-  __ne__: { name: 'notEquals /* __ne__ */', ret: 'boolean' },
-  __hash__: { name: 'hashCode', ret: 'int' },
-  __len__: { name: 'size', ret: 'int' },
-  __bool__: { name: 'isTruthy /* __bool__ */', ret: 'boolean' },
-  __iter__: { name: 'iterator', ret: 'Iterator<Object>' },
-  __next__: { name: 'next', ret: 'Object' },
-  __contains__: { name: 'contains', ret: 'boolean' },
-  __getitem__: { name: 'get /* __getitem__ */', ret: 'Object' },
-  __setitem__: { name: 'put /* __setitem__ */', ret: 'void' },
-  __delitem__: { name: 'remove /* __delitem__ */', ret: 'void' },
-  __call__: { name: 'call /* __call__ */', ret: 'Object' },
-  __enter__: { name: 'enter /* __enter__: try-with-resources open */', ret: 'Object' },
-  __exit__: { name: 'close /* __exit__: try-with-resources close */', ret: 'void' },
-  __lt__: { name: 'compareTo /* __lt__ */', ret: 'boolean' },
-  __le__: { name: 'lessOrEqual /* __le__ */', ret: 'boolean' },
-  __gt__: { name: 'greaterThan /* __gt__ */', ret: 'boolean' },
-  __ge__: { name: 'greaterOrEqual /* __ge__ */', ret: 'boolean' },
-  __add__: { name: 'plus /* __add__ */', ret: 'Object' },
-  __sub__: { name: 'minus /* __sub__ */', ret: 'Object' },
-  __mul__: { name: 'times /* __mul__ */', ret: 'Object' },
-  __post_init__: { name: '__post_init__ /* runs after the generated constructor */', ret: 'void' },
+const DUNDER_METHODS: Record<string, { name: string; ret: string; params?: string; doc: string }> = {
+  __str__: { name: 'toString', ret: 'String', doc: 'Returns a string representation of this object.' },
+  __repr__: { name: 'toString /* __repr__ */', ret: 'String', doc: 'Returns a developer-facing string representation of this object.' },
+  __eq__: { name: 'equals', ret: 'boolean', doc: 'Indicates whether some other object is equal to this one.' },
+  __ne__: { name: 'notEquals /* __ne__ */', ret: 'boolean', doc: 'Indicates whether some other object is not equal to this one.' },
+  __hash__: { name: 'hashCode', ret: 'int', doc: 'Returns a hash code value for this object.' },
+  __len__: { name: 'size', ret: 'int', doc: 'Returns the number of elements.' },
+  __bool__: { name: 'isTruthy /* __bool__ */', ret: 'boolean', doc: 'Returns whether this object is truthy.' },
+  __iter__: { name: 'iterator', ret: 'Iterator<Object>', doc: 'Returns an iterator over the elements.' },
+  __next__: { name: 'next', ret: 'Object', doc: 'Returns the next element.' },
+  __contains__: { name: 'contains', ret: 'boolean', doc: 'Returns whether this object contains the given value.' },
+  __getitem__: { name: 'get /* __getitem__ */', ret: 'Object', doc: 'Returns the value at the given key or index.' },
+  __setitem__: { name: 'put /* __setitem__ */', ret: 'void', doc: 'Sets the value at the given key or index.' },
+  __delitem__: { name: 'remove /* __delitem__ */', ret: 'void', doc: 'Removes the value at the given key or index.' },
+  __call__: { name: 'call /* __call__ */', ret: 'Object', doc: 'Invokes this object as if it were a function.' },
+  __enter__: { name: 'enter /* __enter__: try-with-resources open */', ret: 'Object', doc: 'Enters the context, for use in a try-with-resources block.' },
+  __exit__: { name: 'close /* __exit__: try-with-resources close */', ret: 'void', doc: 'Exits the context, for use in a try-with-resources block.' },
+  __lt__: { name: 'compareTo /* __lt__ */', ret: 'boolean', doc: 'Returns whether this object orders before another.' },
+  __le__: { name: 'lessOrEqual /* __le__ */', ret: 'boolean', doc: 'Returns whether this object orders before or equal to another.' },
+  __gt__: { name: 'greaterThan /* __gt__ */', ret: 'boolean', doc: 'Returns whether this object orders after another.' },
+  __ge__: { name: 'greaterOrEqual /* __ge__ */', ret: 'boolean', doc: 'Returns whether this object orders after or equal to another.' },
+  __add__: { name: 'plus /* __add__ */', ret: 'Object', doc: 'Returns the sum of this object and another.' },
+  __sub__: { name: 'minus /* __sub__ */', ret: 'Object', doc: 'Returns the difference of this object and another.' },
+  __mul__: { name: 'times /* __mul__ */', ret: 'Object', doc: 'Returns the product of this object and another.' },
+  __post_init__: { name: '__post_init__ /* runs after the generated constructor */', ret: 'void', doc: 'Runs after the generated constructor.' },
 };
 
 /** Remove one pair of enclosing parentheses when they wrap the whole text. */
@@ -136,12 +137,23 @@ class RuleTranslation {
   private readonly usedNames = new Set<string>();
   /** Classes, methods and fields declared so far, for "Go to Definition"; rebased in assemble(). */
   private readonly symbols: RawSymbol[] = [];
+  private readonly javadocMode: JavadocMode;
 
   constructor(private readonly input: TranslateInput) {
     this.lines = splitLogicalLines(input.source);
     this.packageParts = packageFromPath(input.relativePath).split('.').filter(Boolean);
     const base = input.relativePath.split('/').pop() ?? 'Module';
     this.moduleClass = base === '__init__.py' ? toPascalCase(input.relativePath.split('/').slice(-2, -1)[0] ?? 'Package') + 'Package' : toPascalCase(base);
+    const requestedMode = input.javadocMode ?? 'docstringOnly';
+    // Test code never gets Javadoc unless the user opted it into the same rules as production code.
+    this.javadocMode = isTestFile(input.relativePath) && !input.documentTestCode ? 'none' : requestedMode;
+  }
+
+  /** Whether a class/method with (or without) a docstring should get a Javadoc comment, per javadocMode. */
+  private wantsJavadoc(hasDocstring: boolean): boolean {
+    if (this.javadocMode === 'none') return false;
+    if (this.javadocMode === 'docstringOnly') return hasDocstring;
+    return true;
   }
 
   // ---------------------------------------------------------------- helpers
@@ -256,24 +268,44 @@ class RuleTranslation {
     return -1;
   }
 
-  private javadocLines(line: LogicalLine): OutLine[] {
+  /** Body lines of a docstring literal, dedented and stripped of the quote delimiters. */
+  private docstringBody(line: LogicalLine): string[] {
     const raw = line.text.replace(/^[rRuUbB]*("""|'''|"|')/, '').replace(/("""|'''|"|')$/, '');
     const bodyLines = raw.split('\n').map((l) => l.trim());
     while (bodyLines.length && bodyLines[0] === '') bodyLines.shift();
     while (bodyLines.length && bodyLines[bodyLines.length - 1] === '') bodyLines.pop();
-    const result: OutLine[] = [];
-    if (bodyLines.length === 1) {
-      result.push({ text: `/** ${bodyLines[0]} */`, py: line.startLine });
-    } else {
-      result.push({ text: '/**', py: line.startLine });
-      for (const b of bodyLines) result.push({ text: ` * ${b}`.replace(/\s+$/, ''), py: line.startLine });
-      result.push({ text: ' */', py: line.startLine });
-    }
-    return result;
+    return bodyLines;
   }
 
-  private emitJavadoc(line: LogicalLine): void {
-    for (const l of this.javadocLines(line)) this.emit(l.text, l.py);
+  /**
+   * Javadoc lines for a class: the docstring if there is one, otherwise a description
+   * extrapolated from the class name.
+   */
+  private classJavadoc(name: string, docLine: LogicalLine | undefined, py: number): OutLine[] {
+    const description = docLine ? this.docstringBody(docLine) : [describeClassSummary(name)];
+    const at = docLine ? docLine.startLine : py;
+    return renderJavadoc(description).map((text) => ({ text, py: at }));
+  }
+
+  /**
+   * Javadoc lines for a method: the docstring (if any) as the description, plus
+   * `@param`/`@return` tags always extrapolated from the Java signature.
+   */
+  private methodJavadoc(
+    pythonName: string,
+    docLine: LogicalLine | undefined,
+    isCtor: boolean,
+    className: string | undefined,
+    dunderDoc: string | undefined,
+    paramNames: string[],
+    ret: string,
+    py: number,
+  ): OutLine[] {
+    const description = docLine ? this.docstringBody(docLine) : [describeMethodSummary(pythonName, isCtor, className, dunderDoc)];
+    const paramTags = paramNames.map((n) => paramTag(n));
+    const retTag = returnTag(pythonName, ret, isCtor);
+    const at = docLine ? docLine.startLine : py;
+    return renderJavadoc(description, paramTags, retTag).map((text) => ({ text, py: at }));
   }
 
   private takeDecorators(): { text: string; py: number }[] {
@@ -309,10 +341,9 @@ class RuleTranslation {
   translate(): TranslateResult {
     // Module docstring
     let first = this.lines.findIndex((l) => l.kind === 'code');
-    if (first >= 0 && isSingleLiteral(maskStrings(this.lines[first].text).text)) {
-      this.moduleDoc = this.javadocLines(this.lines[first]);
-      this.skipIndex = first;
-    }
+    const hasModuleDoc = first >= 0 && isSingleLiteral(maskStrings(this.lines[first].text).text);
+    if (hasModuleDoc && this.javadocMode !== 'none') this.skipIndex = first;
+    this.moduleDoc = this.wantsJavadoc(hasModuleDoc) ? this.classJavadoc(this.moduleClass, hasModuleDoc ? this.lines[first] : undefined, 0) : [];
 
     for (let i = 0; i < this.lines.length; i += 1) {
       if (i === this.skipIndex) continue;
@@ -549,9 +580,9 @@ class RuleTranslation {
     const realBases = bases.filter((b) => !/^(ABC|abc\.ABC|Protocol|typing\.Protocol|Generic\[.*\]|object)$/.test(b) && !ENUM_BASES.has(b.split('.').pop()!) && !RECORD_BASES.has(b.split('.').pop()!));
 
     const doc = this.docstringAfter(i);
-    if (doc >= 0) {
-      this.emitJavadoc(this.lines[doc]);
-      this.skipIndex = doc;
+    if (doc >= 0 && this.javadocMode !== 'none') this.skipIndex = doc;
+    if (this.wantsJavadoc(doc >= 0)) {
+      for (const l of this.classJavadoc(name, doc >= 0 ? this.lines[doc] : undefined, py)) this.emit(l.text, l.py);
     }
     for (const d of decorators) {
       this.emit(this.decoratorToAnnotation(d.text), d.py);
@@ -659,17 +690,13 @@ class RuleTranslation {
     const otherDecorators = decorators.filter((d) => !/^@(staticmethod|classmethod|(abc\.)?abstractmethod|(cached_)?property|\w+\.setter)\b/.test(d.text));
 
     const doc = this.docstringAfter(i);
-    if (doc >= 0) {
-      this.emitJavadoc(this.lines[doc]);
-      this.skipIndex = doc;
-    }
-    for (const d of otherDecorators) this.emit(this.decoratorToAnnotation(d.text), d.py);
-    if (isProperty) this.emit('@Property // accessed like a field in Python: obj.name', py);
-    if (isSetter) this.emit('@Setter // assigned like a field in Python: obj.name = value', py);
+    const docLine = doc >= 0 ? this.lines[doc] : undefined;
+    if (doc >= 0 && this.javadocMode !== 'none') this.skipIndex = doc;
 
     // parameters
     const declared = new Set<string>();
     const params: string[] = [];
+    const paramNames: string[] = [];
     const rawParams = splitTopLevel(paramsText).map((p) => p.trim()).filter(Boolean);
     rawParams.forEach((p, idx) => {
       if (p === '*' || p === '/') return;
@@ -679,11 +706,13 @@ class RuleTranslation {
       if ((pm = /^\*\*(\w+)/.exec(p))) {
         params.push(`Map<String, Object> ${pm[1]} /* **kwargs */`);
         declared.add(pm[1]);
+        paramNames.push(pm[1]);
         return;
       }
       if ((pm = /^\*(\w+)(?::\s*(.+))?/.exec(p))) {
         params.push(`${pm[2] ? boxed(translateType(pm[2])) : 'Object'}... ${pm[1]}`);
         declared.add(pm[1]);
+        paramNames.push(pm[1]);
         return;
       }
       const parsed = /^(\w+)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.+))?$/.exec(p);
@@ -696,6 +725,7 @@ class RuleTranslation {
       let type = hint ? translateType(hint) : def ? this.typeFromDefault(def) : 'Object';
       if (def !== undefined && def.trim() === 'None' && !/nullable/.test(type)) type += ' /* nullable */';
       params.push(def !== undefined ? `${type} ${pname} /* = ${this.expr(def)} */` : `${type} ${pname}`);
+      paramNames.push(pname);
     });
 
     // name, return type, modifiers
@@ -723,6 +753,14 @@ class RuleTranslation {
       if (cls?.isInterface) modifiers = [];
     }
     if (isAsync) ret = ret === 'void' ? 'CompletableFuture<Void> /* async */' : `CompletableFuture<${boxed(ret)}> /* async */`;
+
+    if (this.wantsJavadoc(doc >= 0)) {
+      const dunderDoc = inClass ? DUNDER_METHODS[name]?.doc : undefined;
+      for (const l of this.methodJavadoc(name, docLine, isCtor, cls?.className, dunderDoc, paramNames, ret, py)) this.emit(l.text, l.py);
+    }
+    for (const d of otherDecorators) this.emit(this.decoratorToAnnotation(d.text), d.py);
+    if (isProperty) this.emit('@Property // accessed like a field in Python: obj.name', py);
+    if (isSetter) this.emit('@Setter // assigned like a field in Python: obj.name = value', py);
 
     const nested = !inClass && this.enclosingScope() && this.enclosingScope()!.kind !== 'class';
     if (nested) {

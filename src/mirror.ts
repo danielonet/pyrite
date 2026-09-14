@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { SymbolInfo, TranslateResult, Translator } from './translator';
+import { JavadocMode, SymbolInfo, TranslateResult, Translator } from './translator';
 
 export interface MirrorOptions {
   /** Absolute path of the Python project root. */
@@ -19,6 +19,10 @@ export interface MirrorOptions {
   outputFolder?: string;
   /** Glob-like patterns (minimal: supports ** and *) of paths to skip, relative to root. */
   exclude?: string[];
+  /** Javadoc generation mode for classes/methods (default "docstringOnly"). */
+  javadocMode?: JavadocMode;
+  /** Whether test code follows the same javadocMode as production code (default false: never documented). */
+  documentTestCode?: boolean;
   /** Progress callback: called once per file with the relative path and index. */
   onProgress?: (relativePath: string, index: number, total: number) => void;
   /** Cooperative cancellation. */
@@ -130,11 +134,18 @@ export function mapPathFor(relativePython: string): string {
   return `${MAP_DIR}/${javaPathFor(relativePython)}.json`;
 }
 
+export interface MirrorFileOptions {
+  outputFolder?: string;
+  javadocMode?: JavadocMode;
+  documentTestCode?: boolean;
+}
+
 /** Translate one Python file and write its Java view + source map. Returns the absolute Java path. */
-export async function mirrorFile(translator: Translator, root: string, relativePython: string, outputFolder = '.java-view'): Promise<{ javaAbs: string; result: TranslateResult }> {
+export async function mirrorFile(translator: Translator, root: string, relativePython: string, options: MirrorFileOptions = {}): Promise<{ javaAbs: string; result: TranslateResult }> {
+  const outputFolder = options.outputFolder ?? '.java-view';
   const pyAbs = path.join(root, relativePython);
   const source = fs.readFileSync(pyAbs, 'utf8');
-  const result = await translator.translate({ source, relativePath: relativePython });
+  const result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode });
 
   const outRoot = path.join(root, outputFolder);
   const javaRel = javaPathFor(relativePython);
@@ -175,7 +186,7 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
     if (options.isCancelled?.()) break;
     options.onProgress?.(rel, count, files.length);
     try {
-      const { result } = await mirrorFile(translator, options.root, rel, outputFolder);
+      const { result } = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode });
       warnings.push(...result.warnings);
     } catch (err) {
       warnings.push(`${rel}: failed to translate: ${err instanceof Error ? err.message : String(err)}`);

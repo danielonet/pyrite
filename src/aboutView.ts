@@ -43,7 +43,11 @@ export class PyriteAboutViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async openReadme(): Promise<void> {
-    const uri = vscode.Uri.joinPath(this.context.extensionUri, 'README.md');
+    const uri = await this.findReadmeUri();
+    if (!uri) {
+      void vscode.window.showWarningMessage('Pyrite: could not find README.md in the installed extension.');
+      return;
+    }
     try {
       await vscode.commands.executeCommand('markdown.showPreview', uri);
     } catch {
@@ -52,12 +56,33 @@ export class PyriteAboutViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Locate the extension's root README. Packaging with `vsce` lowercases the
+   * root readme to `readme.md` in the published .vsix, while the source tree
+   * (and an unpacked Extension Development Host) uses `README.md`; on a
+   * case-sensitive filesystem only one of the two actually exists.
+   */
+  private async findReadmeUri(): Promise<vscode.Uri | undefined> {
+    for (const name of ['README.md', 'readme.md']) {
+      const uri = vscode.Uri.joinPath(this.context.extensionUri, name);
+      try {
+        await vscode.workspace.fs.stat(uri);
+        return uri;
+      } catch {
+        // try the next candidate
+      }
+    }
+    return undefined;
+  }
+
   private html(webview: vscode.Webview): string {
     const pkg = this.context.extension.packageJSON as { version?: string; description?: string };
     const cfg = vscode.workspace.getConfiguration('pyrite');
     const engine = cfg.get<string>('engine', 'rules');
     const outputFolder = cfg.get<string>('outputFolder', '.java-view');
     const watch = cfg.get<boolean>('watch', true);
+    const javadoc = cfg.get<string>('javadoc', 'docstringOnly');
+    const javadocTestCode = cfg.get<boolean>('javadocTestCode', false);
     const nonce = getNonce();
 
     return `<!DOCTYPE html>
@@ -116,11 +141,13 @@ export class PyriteAboutViewProvider implements vscode.WebviewViewProvider {
     <tr><td class="key">Engine</td><td class="val">${escapeHtml(engine)}</td></tr>
     <tr><td class="key">Output folder</td><td class="val">${escapeHtml(outputFolder)}/</td></tr>
     <tr><td class="key">Watch on save</td><td class="val">${watch ? 'on' : 'off'}</td></tr>
+    <tr><td class="key">Javadoc</td><td class="val">${escapeHtml(javadoc)}</td></tr>
+    <tr><td class="key">Javadoc test code</td><td class="val">${javadocTestCode ? 'on' : 'off'}</td></tr>
   </table>
 
   <h3>Actions</h3>
   <button data-command="pyrite.generateView">Generate Java View for Workspace</button>
-  <button class="secondary" data-command="workbench.action.openSettings" data-args='["@ext:danielonet.pyrite"]'>Open Settings</button>
+  <button class="secondary" data-command="workbench.action.openSettings" data-args='["@ext:danielonnet.pyrite"]'>Open Settings</button>
   <button class="secondary" id="readme">View README</button>
 
   <script nonce="${nonce}">
