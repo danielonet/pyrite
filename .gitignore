@@ -4,3 +4,9 @@ out/
 .java-view/
 __pycache__/
 .pytest_cache/
+
+# Marketplace publishing credentials belong outside the repo (see
+# scripts/publish-marketplace.sh); these are ignored as a safety net in
+# case one ever ends up here by mistake.
+marketplace.env
+.marketplace.env

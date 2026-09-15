@@ -30,6 +30,16 @@ export interface TranslateInput {
    * files never get Javadoc regardless of `javadocMode`.
    */
   documentTestCode?: boolean;
+  /**
+   * Render idiomatic Lombok-style Java instead of spelling out boilerplate: a class whose
+   * `__init__` only assigns every parameter to a same-named field gets `@AllArgsConstructor`
+   * instead of a written-out constructor; a trivial `__str__`/`__repr__` becomes `@ToString`;
+   * a trivial `__eq__`/`__hash__` becomes `@EqualsAndHashCode`; a `@property`/`@x.setter` pair
+   * that's a plain pass-through to a field becomes `@Getter`/`@Setter` on that field; and a
+   * dataclass-like class (`@dataclass`, `NamedTuple`, `BaseModel`, ...) gets `@Data`. Defaults
+   * to false. Methods that don't match these simple shapes are left as ordinary Java.
+   */
+  lombokStyle?: boolean;
 }
 
 export type SymbolKind = 'class' | 'method' | 'field';

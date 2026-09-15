@@ -37,6 +37,33 @@ interface Block {
   declared?: Set<string>;
   /** Name bound by `except ... as name` for this catch block. */
   catchVar?: string;
+  /** pyrite.lombokStyle plan for this class, if any boilerplate here can be collapsed. */
+  lombokPlan?: LombokPlan;
+}
+
+/** A `@property`/`@x.setter` pair that is a plain pass-through to a field, collapsible to `@Getter`/`@Setter`. */
+interface LombokPropertyPlan {
+  /** The `self.<field>` the property reads/writes. */
+  field: string;
+  getter: boolean;
+  setter: boolean;
+}
+
+/**
+ * What can be rewritten as Lombok annotations for one class, decided by scanning its whole
+ * body up front (see `buildLombokPlan`) - before any of its methods are emitted.
+ */
+interface LombokPlan {
+  suppressCtor: boolean;
+  suppressToString: boolean;
+  suppressEquals: boolean;
+  suppressHash: boolean;
+  /** Class-level annotations to emit (e.g. `@AllArgsConstructor`, `@ToString`, `@Data`). */
+  annotations: string[];
+  /** Python property name -> plan, keyed the same for the getter and its `.setter`. */
+  properties: Map<string, LombokPropertyPlan>;
+  /** Field name -> which of `@Getter`/`@Setter` to place on its declaration. */
+  fieldAnnotations: Map<string, { getter: boolean; setter: boolean }>;
 }
 
 interface OutLine {
@@ -585,11 +612,21 @@ class RuleTranslation {
       for (const l of this.classJavadoc(name, doc >= 0 ? this.lines[doc] : undefined, py)) this.emit(l.text, l.py);
     }
     for (const d of decorators) {
+      // A record-style @dataclass is replaced by @Data below in Lombok style; don't double-annotate.
+      if (this.input.lombokStyle && isRecord && RECORD_DECORATORS.test(d.text)) continue;
       this.emit(this.decoratorToAnnotation(d.text), d.py);
     }
-    if (isRecord && !decorators.some((d) => RECORD_DECORATORS.test(d.text))) {
+    if (isRecord && this.input.lombokStyle) {
+      this.emit('@Data', py);
+    } else if (isRecord && !decorators.some((d) => RECORD_DECORATORS.test(d.text))) {
       this.emit(`/* ${bases.find((b) => RECORD_BASES.has(b.split('.').pop()!))}: value object with generated constructor/equals/hashCode */`, py);
     }
+
+    // Field declarations for attributes assigned via self.x = ... anywhere in the class, and
+    // (in Lombok style) the plan for which boilerplate we can collapse into annotations instead.
+    const fields = !isEnum ? this.collectSelfFields(i) : [];
+    const lombokPlan = !isEnum && !isInterface ? this.buildLombokPlan(i, fields, isRecord) : undefined;
+    for (const ann of lombokPlan?.annotations ?? []) this.emit(ann, py);
 
     let header: string;
     const typeParams = generics.length ? `<${generics.join(', ')}>` : '';
@@ -609,12 +646,10 @@ class RuleTranslation {
     this.usedNames.add(name);
     this.recordSymbol(name, 'class', py);
 
-    const block: Block = { indent: line.indent, kind: 'class', className: name, isEnum, isRecord, isInterface };
+    const block: Block = { indent: line.indent, kind: 'class', className: name, isEnum, isRecord, isInterface, lombokPlan };
     this.stack.push(block);
 
-    // Field declarations for attributes assigned via self.x = ... anywhere in the class.
     if (!isEnum) {
-      const fields = this.collectSelfFields(i);
       const declaredAtClassLevel = new Set(
         this.bodyLines(i)
           .filter((l) => l.indent === line.indent + this.indentUnit(i))
@@ -624,11 +659,122 @@ class RuleTranslation {
       const toEmit = fields.filter((f) => !declaredAtClassLevel.has(f.name));
       for (const f of toEmit) {
         const visibility = f.name.startsWith('_') ? 'private' : 'public';
+        const fieldAnn = lombokPlan?.fieldAnnotations.get(f.name);
+        if (fieldAnn) {
+          const parts = [fieldAnn.getter ? '@Getter' : '', fieldAnn.setter ? '@Setter' : ''].filter(Boolean);
+          this.emit(parts.join(' '), f.py);
+        }
         this.emit(`${visibility} ${f.type} ${f.name}; // assigned as self.${f.name} in ${f.where}`, f.py);
         this.recordSymbol(f.name, 'field', f.py);
       }
       if (toEmit.length) this.emit('', 0, 0);
     }
+  }
+
+  /**
+   * Scans a class body up front (before any of its methods are emitted) to decide which
+   * boilerplate can be collapsed into Lombok annotations when `input.lombokStyle` is on:
+   * a pure `self.x = x` constructor -> `@AllArgsConstructor`, a trivial `__str__`/`__repr__`
+   * -> `@ToString`, a trivial `__eq__`/`__hash__` -> `@EqualsAndHashCode`, and a `@property`/
+   * `@x.setter` pair that just wraps a field -> `@Getter`/`@Setter` on that field. Returns
+   * `undefined` when the option is off or nothing in the class qualifies.
+   */
+  private buildLombokPlan(i: number, fields: { name: string }[], isRecord: boolean): LombokPlan | undefined {
+    if (!this.input.lombokStyle) return undefined;
+    const header = this.lines[i];
+    const methodIndent = header.indent + this.indentUnit(i);
+    const fieldNames = new Set(fields.map((f) => f.name));
+
+    interface DefInfo {
+      index: number;
+      name: string;
+      params: string[];
+      decorators: string[];
+    }
+    const defs: DefInfo[] = [];
+    let pendingDecos: string[] = [];
+    for (let j = i + 1; j < this.lines.length; j += 1) {
+      const l = this.lines[j];
+      if (l.kind !== 'code') continue;
+      if (l.indent <= header.indent) break;
+      if (l.indent !== methodIndent) continue;
+      const code = this.splitComment(maskStrings(l.text).text).code;
+      if (code.startsWith('@')) {
+        pendingDecos.push(code);
+        continue;
+      }
+      const d = /^(?:async\s+)?def\s+(\w+)\s*\((.*)\)/.exec(code);
+      if (d) {
+        defs.push({ index: j, name: d[1], params: splitTopLevel(d[2]).map((p) => p.trim()).filter(Boolean), decorators: pendingDecos });
+      }
+      pendingDecos = [];
+    }
+
+    /** A single-statement body with no docstring: `return ...` or `self.x = ...`. */
+    const isTrivial = (defIndex: number): boolean => {
+      if (this.docstringAfter(defIndex) >= 0) return false;
+      const body = this.bodyLines(defIndex);
+      if (body.length !== 1) return false;
+      const code = this.splitComment(maskStrings(body[0].text).text).code;
+      return /^(return\b|self\.\w+\s*=)/.test(code);
+    };
+
+    const plan: LombokPlan = { suppressCtor: false, suppressToString: false, suppressEquals: false, suppressHash: false, annotations: [], properties: new Map(), fieldAnnotations: new Map() };
+
+    // A dataclass-like class is already fully covered by @Data (emitted separately); a hand-written
+    // __init__/__str__/__eq__/__hash__ on top of it is unusual and safer left spelled out.
+    if (!isRecord) {
+      const ctor = defs.find((d) => d.name === '__init__');
+      if (ctor) {
+        const ctorParams = ctor.params.filter((p) => p !== 'self');
+        const simpleParams = ctorParams.every((p) => /^\w+(\s*:\s*[^=]+)?$/.test(p));
+        const paramNames = ctorParams.map((p) => /^(\w+)/.exec(p)![1]);
+        if (paramNames.length && simpleParams && paramNames.length === fields.length && this.docstringAfter(ctor.index) < 0) {
+          const body = this.bodyLines(ctor.index);
+          const isBoilerplate =
+            body.length === paramNames.length &&
+            body.every((l, idx) => new RegExp(`^self\\.${paramNames[idx]}\\s*=\\s*${paramNames[idx]}$`).test(this.splitComment(maskStrings(l.text).text).code));
+          if (isBoilerplate) {
+            plan.suppressCtor = true;
+            plan.annotations.push('@AllArgsConstructor');
+          }
+        }
+      }
+
+      const strDef = defs.find((d) => d.name === '__str__') ?? defs.find((d) => d.name === '__repr__');
+      if (strDef && isTrivial(strDef.index)) {
+        plan.suppressToString = true;
+        plan.annotations.push('@ToString');
+      }
+
+      const eqDef = defs.find((d) => d.name === '__eq__');
+      const hashDef = defs.find((d) => d.name === '__hash__');
+      if (eqDef && isTrivial(eqDef.index)) plan.suppressEquals = true;
+      if (hashDef && isTrivial(hashDef.index)) plan.suppressHash = true;
+      if (plan.suppressEquals || plan.suppressHash) plan.annotations.push('@EqualsAndHashCode');
+    }
+
+    for (const d of defs) {
+      if (!d.decorators.some((deco) => /^@property\b/.test(deco)) || !isTrivial(d.index)) continue;
+      const m = /^return\s+self\.(\w+)$/.exec(this.splitComment(maskStrings(this.bodyLines(d.index)[0].text).text).code);
+      if (m && fieldNames.has(m[1])) plan.properties.set(d.name, { field: m[1], getter: true, setter: false });
+    }
+    for (const d of defs) {
+      const prop = plan.properties.get(d.name);
+      if (!prop || !d.decorators.some((deco) => new RegExp(`^@${d.name}\\.setter\\b`).test(deco)) || !isTrivial(d.index)) continue;
+      const valueParam = /^(\w+)/.exec(d.params.filter((p) => p !== 'self')[0] ?? '')?.[1];
+      if (!valueParam) continue;
+      const code = this.splitComment(maskStrings(this.bodyLines(d.index)[0].text).text).code;
+      if (new RegExp(`^self\\.${prop.field}\\s*=\\s*${valueParam}$`).test(code)) prop.setter = true;
+    }
+    for (const prop of plan.properties.values()) {
+      const existing = plan.fieldAnnotations.get(prop.field) ?? { getter: false, setter: false };
+      existing.getter = existing.getter || prop.getter;
+      existing.setter = existing.setter || prop.setter;
+      plan.fieldAnnotations.set(prop.field, existing);
+    }
+
+    return plan.annotations.length || plan.properties.size ? plan : undefined;
   }
 
   private indentUnit(i: number): number {
@@ -682,6 +828,31 @@ class RuleTranslation {
     const decorators = this.takeDecorators();
     const cls = this.enclosingClass();
     const inClass = cls !== undefined && this.top() === cls;
+
+    // Lombok style: this method is fully covered by a class-level annotation decided up front
+    // in buildLombokPlan() (called from translateClass before any method is emitted) - skip it.
+    if (inClass && cls!.lombokPlan) {
+      const plan = cls!.lombokPlan;
+      const suppressed =
+        (name === '__init__' && plan.suppressCtor) ||
+        ((name === '__str__' || name === '__repr__') && plan.suppressToString) ||
+        (name === '__eq__' && plan.suppressEquals) ||
+        (name === '__hash__' && plan.suppressHash);
+      if (suppressed) {
+        this.skipUntilIndentBelow(i);
+        return;
+      }
+      const prop = plan.properties.get(name);
+      if (prop) {
+        const isGetterHere = decorators.some((d) => /^@property\b/.test(d.text));
+        const isSetterHere = decorators.some((d) => new RegExp(`^@${name}\\.setter\\b`).test(d.text));
+        if ((isGetterHere && prop.getter) || (isSetterHere && prop.setter)) {
+          this.skipUntilIndentBelow(i);
+          return;
+        }
+      }
+    }
+
     const isStaticDecorated = decorators.some((d) => /^@(staticmethod|classmethod)\b/.test(d.text));
     const isClassMethod = decorators.some((d) => /^@classmethod\b/.test(d.text));
     const isAbstract = decorators.some((d) => /^@(abc\.)?abstractmethod\b/.test(d.text));

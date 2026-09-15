@@ -20,11 +20,12 @@ interface Args {
   engine: EngineName;
   javadoc: JavadocMode;
   javadocTestCode: boolean;
+  lombok: boolean;
   quiet: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { out: '.java-view', engine: 'rules', javadoc: 'docstringOnly', javadocTestCode: false, quiet: false };
+  const args: Args = { out: '.java-view', engine: 'rules', javadoc: 'docstringOnly', javadocTestCode: false, lombok: true, quiet: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -38,6 +39,8 @@ function parseArgs(argv: string[]): Args {
       }
       args.javadoc = value as JavadocMode;
     } else if (a === '--javadoc-test-code') args.javadocTestCode = true;
+    else if (a === '--lombok') args.lombok = true;
+    else if (a === '--no-lombok') args.lombok = false;
     else if (a === '--quiet' || a === '-q') args.quiet = true;
     else if (a === '--help' || a === '-h') {
       printUsage();
@@ -54,10 +57,11 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--quiet]
-  pyrite --file <module.py> [--javadoc always|docstringOnly|none] [--javadoc-test-code]
+  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--quiet]
+  pyrite --file <module.py> [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok]
 
-  --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).`);
+  --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).
+  --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).`);
 }
 
 async function main(): Promise<void> {
@@ -68,7 +72,7 @@ async function main(): Promise<void> {
   if (args.file) {
     const abs = path.resolve(args.file);
     const source = fs.readFileSync(abs, 'utf8');
-    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode });
+    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode, lombokStyle: args.lombok });
     process.stdout.write(result.java);
     for (const w of result.warnings) console.error(`warning: ${w}`);
     return;
@@ -89,6 +93,7 @@ async function main(): Promise<void> {
     exclude: DEFAULT_EXCLUDES,
     javadocMode: args.javadoc,
     documentTestCode: args.javadocTestCode,
+    lombokStyle: args.lombok,
     onProgress: (rel, i, total) => {
       if (!args.quiet) console.error(`[${i + 1}/${total}] ${rel}`);
     },

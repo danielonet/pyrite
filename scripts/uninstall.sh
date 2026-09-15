@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-PUBLISHER_AND_NAME="danielonet.pyrite"
+PUBLISHER_AND_NAME="danielonnet.pyrite"
 
 CODE_BIN=""
 for candidate in code code-insiders codium; do

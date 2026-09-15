@@ -23,6 +23,8 @@ export interface MirrorOptions {
   javadocMode?: JavadocMode;
   /** Whether test code follows the same javadocMode as production code (default false: never documented). */
   documentTestCode?: boolean;
+  /** Render idiomatic Lombok-style Java instead of boilerplate (default false). See `TranslateInput.lombokStyle`. */
+  lombokStyle?: boolean;
   /** Progress callback: called once per file with the relative path and index. */
   onProgress?: (relativePath: string, index: number, total: number) => void;
   /** Cooperative cancellation. */
@@ -138,6 +140,7 @@ export interface MirrorFileOptions {
   outputFolder?: string;
   javadocMode?: JavadocMode;
   documentTestCode?: boolean;
+  lombokStyle?: boolean;
 }
 
 /** Translate one Python file and write its Java view + source map. Returns the absolute Java path. */
@@ -145,7 +148,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
   const outputFolder = options.outputFolder ?? '.java-view';
   const pyAbs = path.join(root, relativePython);
   const source = fs.readFileSync(pyAbs, 'utf8');
-  const result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode });
+  const result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
 
   const outRoot = path.join(root, outputFolder);
   const javaRel = javaPathFor(relativePython);
@@ -186,7 +189,7 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
     if (options.isCancelled?.()) break;
     options.onProgress?.(rel, count, files.length);
     try {
-      const { result } = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode });
+      const { result } = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
       warnings.push(...result.warnings);
     } catch (err) {
       warnings.push(`${rel}: failed to translate: ${err instanceof Error ? err.message : String(err)}`);

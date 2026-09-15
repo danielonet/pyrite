@@ -8,5 +8,6 @@ out/test/**
 !**/*.d.ts
 tsconfig.json
 sample-python-project/**
+.java-view/**
 .gitignore
 .nvmrc

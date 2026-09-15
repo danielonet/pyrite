@@ -32,6 +32,7 @@ interface Settings {
   watch: boolean;
   javadoc: JavadocMode;
   javadocTestCode: boolean;
+  lombok: boolean;
 }
 
 function settings(): Settings {
@@ -43,6 +44,7 @@ function settings(): Settings {
     watch: cfg.get<boolean>('watch', true),
     javadoc: cfg.get<JavadocMode>('javadoc', 'docstringOnly'),
     javadocTestCode: cfg.get<boolean>('javadocTestCode', false),
+    lombok: cfg.get<boolean>('lombok', true),
   };
 }
 
@@ -96,6 +98,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
         exclude: [...s.exclude, ...(scopeRoot !== root.uri.fsPath ? [] : [])],
         javadocMode: s.javadoc,
         documentTestCode: s.javadocTestCode,
+        lombokStyle: s.lombok,
         isCancelled: () => token.isCancellationRequested,
         onProgress: (rel, i, total) => {
           if (scopeRoot !== root.uri.fsPath && !path.join(root.uri.fsPath, rel).startsWith(scopeRoot)) return;
@@ -127,7 +130,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean): Promise<vscode.
   statusItem.text = '$(sync~spin) Pyrite';
   statusItem.show();
   try {
-    const { javaAbs, result } = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode });
+    const { javaAbs, result } = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok });
     for (const w of result.warnings) output.appendLine(`warning: ${w}`);
     const javaUri = vscode.Uri.file(javaAbs);
     if (reveal) {

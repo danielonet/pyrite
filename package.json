@@ -166,6 +166,11 @@
           "type": "boolean",
           "default": false,
           "description": "Document test code. When unchecked (default), test files (test_*.py, *_test.py, conftest.py, or anything under a test/tests folder) never get Javadoc. When checked, test code follows the same pyrite.javadoc rules as production code."
+        },
+        "pyrite.lombok": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use Lombok-style annotations instead of spelling out boilerplate: a class whose __init__ only assigns its parameters to fields gets @AllArgsConstructor, a trivial __str__/__repr__ becomes @ToString, a trivial __eq__/__hash__ becomes @EqualsAndHashCode, a @property/@x.setter pair that just wraps a field becomes @Getter/@Setter on that field, and a dataclass-like class (@dataclass, NamedTuple, pydantic BaseModel, ...) becomes @Data. Methods that don't match these simple shapes are left spelled out."
         }
       }
     }
@@ -177,7 +182,8 @@
     "cli": "node out/cli.js",
     "package": "vsce package",
     "install:local": "bash scripts/build-and-install.sh",
-    "uninstall:local": "bash scripts/uninstall.sh"
+    "uninstall:local": "bash scripts/uninstall.sh",
+    "publish:marketplace": "bash scripts/publish-marketplace.sh"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

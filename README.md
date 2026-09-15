@@ -88,6 +88,13 @@ Host; open `sample-python-project` there and run *Pyrite: Generate Java View for
 
 To build an installable package: `npx @vscode/vsce package` (produces a `.vsix`).
 
+To publish a release to the Visual Studio Marketplace: `npm run publish:marketplace`
+(runs [scripts/publish-marketplace.sh](scripts/publish-marketplace.sh) - builds, tests,
+packages and publishes). It reads the publisher id and Marketplace personal access token
+from a plain text file *outside* this repo (`~/.config/pyrite/marketplace.env` by default,
+never committed); the script prints a template and instructions the first time it's run.
+Use `--dry-run` to build and package without publishing.
+
 ## Settings
 
 | Setting | Default | Meaning |
@@ -98,6 +105,7 @@ To build an installable package: `npx @vscode/vsce package` (produces a `.vsix`)
 | `pyrite.watch` | `true` | re-translate on save |
 | `pyrite.javadoc` | `docstringOnly` | Javadoc generation: `always` (every class/method, extrapolated when there's no docstring), `docstringOnly` (only where a docstring exists), or `none` (no Javadoc; docstrings kept as plain comments) |
 | `pyrite.javadocTestCode` | `false` | Document test code too, using the same `pyrite.javadoc` rules as production code. When unchecked, test files (`test_*.py`, `*_test.py`, `conftest.py`, or anything under a `test`/`tests` folder) never get Javadoc |
+| `pyrite.lombok` | `true` | Use Lombok-style annotations instead of spelling out boilerplate: a plain `self.x = x` `__init__` becomes `@AllArgsConstructor`, a trivial `__str__`/`__repr__` becomes `@ToString`, a trivial `__eq__`/`__hash__` becomes `@EqualsAndHashCode`, a `@property`/`@x.setter` pair that just wraps a field becomes `@Getter`/`@Setter` on that field, and a dataclass-like class becomes `@Data`. Methods that don't match these simple shapes are left spelled out |
 
 The generated folder contains its own `.gitignore` so it is never committed.
 

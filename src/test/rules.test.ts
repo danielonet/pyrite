@@ -344,6 +344,140 @@ test('javadoc: "none" mode emits no Javadoc; docstrings fall back to a plain com
   contains(out, '/* A 2D point. */\n        public Point(Object x, Object y) {');
 });
 
+test('lombok: off by default - boilerplate is spelled out as before', () => {
+  const src = `class Person:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+    def __str__(self):
+        return f"{self.name}"
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py' }).java;
+  contains(out, 'public Person(Object name, Object age) {');
+  contains(out, 'public String toString() {');
+  assert.ok(!out.includes('@AllArgsConstructor'));
+  assert.ok(!out.includes('@ToString'));
+});
+
+test('lombok: a pure self.x = x constructor becomes @AllArgsConstructor', () => {
+  const src = `class Person:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
+  contains(out, '@AllArgsConstructor');
+  assert.ok(!out.includes('public Person('), `constructor should be collapsed away:\n${out}`);
+  contains(out, 'public Object name;');
+  contains(out, 'public Object age;');
+});
+
+test('lombok: a constructor with a default value or extra fields is left spelled out', () => {
+  const src = `class Account:
+    def __init__(self, owner, balance=0.0):
+        self.owner = owner
+        self.balance = balance
+
+class Widget:
+    def __init__(self, a):
+        self.a = a
+        self.b = 0
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
+  contains(out, 'public Account(Object owner, double balance /* = 0.0 */) {');
+  contains(out, 'public Widget(Object a) {');
+  assert.ok(!out.includes('@AllArgsConstructor'));
+});
+
+test('lombok: trivial __str__/__repr__ and __eq__/__hash__ become @ToString/@EqualsAndHashCode', () => {
+  const src = `class Person:
+    def __init__(self, name):
+        self.name = name
+
+    def __str__(self):
+        return self.name
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
+  contains(out, '@ToString');
+  contains(out, '@EqualsAndHashCode');
+  assert.ok(!out.includes('public String toString()'));
+  assert.ok(!out.includes('public boolean equals('));
+  assert.ok(!out.includes('public int hashCode()'));
+});
+
+test('lombok: a non-trivial __str__ (multiple statements) is left spelled out', () => {
+  const src = `class Person:
+    def __init__(self, name):
+        self.name = name
+
+    def __str__(self):
+        prefix = "Person: "
+        return prefix + self.name
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
+  assert.ok(!out.includes('@ToString'));
+  contains(out, 'public String toString() {');
+});
+
+test('lombok: a trivial @property/@x.setter pair over a field becomes @Getter/@Setter', () => {
+  const src = `class Account:
+    def __init__(self, owner, balance):
+        self._owner = owner
+        self._balance = balance
+
+    @property
+    def owner(self):
+        return self._owner
+
+    @property
+    def balance(self):
+        return self._balance
+
+    @balance.setter
+    def balance(self, value):
+        self._balance = value
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
+  contains(out, '@Getter\n        private Object _owner;');
+  contains(out, '@Getter @Setter\n        private Object _balance;');
+  assert.ok(!out.includes('owner()'), `getter method should be collapsed away:\n${out}`);
+  assert.ok(!out.includes('balance()'), `getter/setter methods should be collapsed away:\n${out}`);
+});
+
+test('lombok: a property with non-trivial logic keeps its manual method', () => {
+  const src = `class Account:
+    def __init__(self, balance):
+        self._balance = balance
+
+    @property
+    def balance(self):
+        return max(self._balance, 0)
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
+  assert.ok(!out.includes('@Getter'));
+  contains(out, 'balance() {');
+});
+
+test('lombok: a dataclass becomes @Data', () => {
+  const src = `from dataclasses import dataclass
+
+@dataclass
+class Point:
+    x: int
+    y: int
+`;
+  const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
+  contains(out, '@Data\n    public static class Point {');
+  assert.ok(!out.includes('@Dataclass'));
+});
+
 test('mirror helpers: globs and line lookups', () => {
   assert.ok(globToRegExp('**/node_modules/**').test('a/node_modules/b.py'));
   assert.ok(isExcluded('.venv/lib/x.py', ['**/.venv/**']));
