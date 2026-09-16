@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { runMirrorInBackground } from '../backgroundMirror';
-import { listPythonFiles, listPythonFilesAsync, mirrorProject } from '../mirror';
+import { listPythonFiles, listPythonFilesAsync, mirrorProject, normalizeSubfolder } from '../mirror';
 import { createTranslator } from '../translator';
 
 function makeProject(moduleCount: number): string {
@@ -85,6 +85,50 @@ test('listPythonFilesAsync matches listPythonFiles and honors excludes', async (
     assert.deepEqual(async, listPythonFiles(root));
     assert.ok(!async.some((f) => f.includes('node_modules')));
     assert.deepEqual(await listPythonFilesAsync(root, undefined, () => true), [], 'a cancelled walk returns nothing');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('subfolder scope: only that folder is read and translated, paths stay relative to root', async () => {
+  const root = makeProject(6); // even modules in pkg/, odd modules in pkg/sub/
+  try {
+    const listed = await listPythonFilesAsync(root, undefined, undefined, 'pkg/sub');
+    assert.deepEqual(listed, ['pkg/sub/mod_1.py', 'pkg/sub/mod_3.py', 'pkg/sub/mod_5.py']);
+    assert.deepEqual(await listPythonFilesAsync(root, undefined, undefined, 'pkg\\sub/'.replace('\\', path.sep)), listed, 'separators and trailing slash are normalized');
+
+    const run = runMirrorInBackground({ engine: 'rules', options: { root, subfolder: 'pkg/sub' } });
+    const summary = await run.result;
+    assert.equal(summary.files, 3);
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'pkg', 'sub', 'mod_1.java')));
+    assert.equal(fs.existsSync(path.join(root, '.java-view', 'pkg', 'mod_0.java')), false, 'files outside the subfolder are not translated');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('subfolder scope: an excluded or escaping subfolder is handled', async () => {
+  const root = makeProject(2);
+  try {
+    fs.mkdirSync(path.join(root, 'node_modules', 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'node_modules', 'lib', 'x.py'), '', 'utf8');
+    assert.deepEqual(await listPythonFilesAsync(root, undefined, undefined, 'node_modules/lib'), []);
+    assert.equal(normalizeSubfolder(root, ''), '');
+    assert.throws(() => normalizeSubfolder(root, '../elsewhere'), /outside the project root/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('runMirrorInBackground falls back to in-process work when the worker script is missing', async () => {
+  const root = makeProject(3);
+  try {
+    const seen: number[] = [];
+    const run = runMirrorInBackground({ engine: 'rules', options: { root } }, (_rel, index) => seen.push(index), path.join(root, 'no-such-worker.js'));
+    const summary = await run.result;
+    assert.equal(summary.files, 3);
+    assert.deepEqual(seen, [0, 1, 2, 3]);
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'pkg', 'mod_0.java')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

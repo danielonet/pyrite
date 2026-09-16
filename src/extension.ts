@@ -18,13 +18,26 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { createTranslator, EngineName, JavadocMode, Translator } from './translator';
-import { javaLineFor, javaPathFor, mirrorFile, pythonLineFor, readSourceMap, removeMirroredFile, isExcluded } from './mirror';
+import { javaLineFor, javaPathFor, mirrorFile, pythonLineFor, readSourceMap, removeMirroredFile, removeMirroredFolder, isExcluded } from './mirror';
 import { runMirrorInBackground } from './backgroundMirror';
-import { buildSymbolIndex, resolveDefinition } from './definitionIndex';
+import { SymbolIndexCache, resolveDefinition } from './definitionIndex';
 import { PyriteAboutViewProvider } from './aboutView';
 
 let output: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
+
+/** One symbol index per workspace folder + output folder, kept warm between "Go to Definition" calls. */
+const symbolIndexes = new Map<string, SymbolIndexCache>();
+
+function symbolIndexFor(root: vscode.WorkspaceFolder, outputFolder = settings().outputFolder): SymbolIndexCache {
+  const key = `${root.uri.fsPath}\0${outputFolder}`;
+  let cache = symbolIndexes.get(key);
+  if (!cache) {
+    cache = new SymbolIndexCache(root.uri.fsPath, outputFolder);
+    symbolIndexes.set(key, cache);
+  }
+  return cache;
+}
 
 interface Settings {
   engine: EngineName;
@@ -86,9 +99,15 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
   }
   const s = settings();
   const scopeRoot = folderUri && fs.statSync(folderUri.fsPath).isDirectory() ? folderUri.fsPath : root.uri.fsPath;
+  // Invoked on a sub-folder from the Explorer: translate only that folder, keeping paths relative to the workspace root.
+  const subfolder = scopeRoot !== root.uri.fsPath ? relPath(root, scopeRoot) : undefined;
+  if (subfolder && isInsideOutput(root, scopeRoot)) {
+    void vscode.window.showInformationMessage(`Pyrite: ${subfolder} is part of the generated Java view, not Python sources.`);
+    return;
+  }
 
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Pyrite: generating Java view', cancellable: true },
+    { location: vscode.ProgressLocation.Notification, title: subfolder ? `Pyrite: generating Java view for ${subfolder}` : 'Pyrite: generating Java view', cancellable: true },
     async (progress, token) => {
       const started = Date.now();
       // The translation runs on a worker thread so a large project never freezes the extension host;
@@ -100,14 +119,14 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
           options: {
             root: root.uri.fsPath,
             outputFolder: s.outputFolder,
-            exclude: [...s.exclude, ...(scopeRoot !== root.uri.fsPath ? [] : [])],
+            exclude: s.exclude,
+            subfolder,
             javadocMode: s.javadoc,
             documentTestCode: s.javadocTestCode,
             lombokStyle: s.lombok,
           },
         },
         (rel, i, total) => {
-          if (scopeRoot !== root.uri.fsPath && !path.join(root.uri.fsPath, rel).startsWith(scopeRoot)) return;
           const percent = ((i + 1) / Math.max(total, 1)) * 100;
           progress.report({ message: `${i + 1}/${total} ${rel}`, increment: percent - reported });
           reported = percent;
@@ -124,6 +143,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
         return;
       } finally {
         cancelListener.dispose();
+        symbolIndexFor(root, s.outputFolder).invalidateAll();
       }
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       output.appendLine(`Generated ${summary.files} file(s) in ${summary.outputRoot} (${summary.engine} engine, ${secs}s${summary.skipped ? `, ${summary.skipped} package-marker __init__.py skipped` : ''}).`);
@@ -153,6 +173,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   statusItem.show();
   try {
     const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok });
+    symbolIndexFor(root, s.outputFolder).invalidatePython(rel);
     if (outcome.skipped) {
       // Only tell the user when they asked for this file explicitly, not on every watched save.
       if (!quiet) void vscode.window.showInformationMessage(`Pyrite: ${rel} only marks a Python package (Java packages are plain folders), so it has no Java view.`);
@@ -167,7 +188,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
     return javaUri;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    output.appendLine(`error: ${rel}: ${msg}`);
+    output.appendLine(`error: ${rel}: ${msg} (a placeholder view saying so was written in place of the old one)`);
     void vscode.window.showErrorMessage(`Pyrite: failed to translate ${rel}: ${msg}`);
     return undefined;
   } finally {
@@ -229,7 +250,7 @@ async function goToPythonSource(): Promise<void> {
  * definition provider.
  */
 class PyriteDefinitionProvider implements vscode.DefinitionProvider {
-  provideDefinition(document: vscode.TextDocument, position: vscode.Position): vscode.Location[] | undefined {
+  async provideDefinition(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Location[] | undefined> {
     const root = rootFor(document.uri);
     if (!root || !isInsideOutput(root, document.uri.fsPath)) return undefined;
     const range = document.getWordRangeAtPosition(position);
@@ -237,7 +258,7 @@ class PyriteDefinitionProvider implements vscode.DefinitionProvider {
     const word = document.getText(range);
     const s = settings();
     const fromFile = relPath(root, document.uri.fsPath);
-    const index = buildSymbolIndex(root.uri.fsPath, s.outputFolder);
+    const index = await symbolIndexFor(root, s.outputFolder).get();
     const matches = resolveDefinition(index, word, fromFile, position.line);
     if (!matches.length) return undefined;
     return matches.map((m) => new vscode.Location(vscode.Uri.file(path.join(root.uri.fsPath, m.javaFile)), new vscode.Position(m.javaLine, 0)));
@@ -256,6 +277,7 @@ async function clearView(): Promise<void> {
   const pick = await vscode.window.showWarningMessage(`Delete the generated folder ${s.outputFolder}/?`, { modal: true }, 'Delete');
   if (pick !== 'Delete') return;
   fs.rmSync(out, { recursive: true, force: true });
+  symbolIndexFor(root, s.outputFolder).invalidateAll();
   void vscode.window.showInformationMessage(`Pyrite: deleted ${s.outputFolder}/.`);
 }
 
@@ -297,16 +319,39 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!fs.existsSync(outDir)) return; // the user has not generated a view yet - stay quiet
     await translateOne(uri, false, true);
   };
+  // Deletions are watched on everything, not just *.py: removing a folder fires one event for the
+  // folder, none for the files inside it, and that folder's whole mirrored subtree must go too.
+  const deleteWatcher = vscode.workspace.createFileSystemWatcher('**', true, true, false);
   context.subscriptions.push(
     watcher,
     watcher.onDidChange(onChange),
     watcher.onDidCreate(onChange),
-    watcher.onDidDelete((uri) => {
+    deleteWatcher,
+    deleteWatcher.onDidDelete((uri) => {
       const root = rootFor(uri);
-      if (!root || !settings().watch) return;
-      removeMirroredFile(root.uri.fsPath, relPath(root, uri.fsPath), settings().outputFolder);
+      if (!root || !settings().watch || isInsideOutput(root, uri.fsPath)) return;
+      const rel = relPath(root, uri.fsPath);
+      const s = settings();
+      if (rel.endsWith('.py')) {
+        removeMirroredFile(root.uri.fsPath, rel, s.outputFolder);
+        symbolIndexFor(root, s.outputFolder).invalidatePython(rel);
+      } else if (!path.extname(rel)) {
+        // Probably a folder (it no longer exists, so it cannot be checked); harmless when nothing was mirrored there.
+        removeMirroredFolder(root.uri.fsPath, rel, s.outputFolder);
+        symbolIndexFor(root, s.outputFolder).invalidateAll();
+      }
     }),
   );
+
+  // Maps can also change outside this window (the CLI, another VS Code window, git checkout of the output folder).
+  const mapWatcher = vscode.workspace.createFileSystemWatcher('**/.pyrite/maps/**/*.json');
+  const onMapChange = (uri: vscode.Uri) => {
+    for (const cache of symbolIndexes.values()) {
+      const rel = path.relative(cache.mapsRoot, uri.fsPath);
+      if (!rel.startsWith('..') && !path.isAbsolute(rel)) cache.invalidateMap(uri.fsPath);
+    }
+  };
+  context.subscriptions.push(mapWatcher, mapWatcher.onDidChange(onMapChange), mapWatcher.onDidCreate(onMapChange), mapWatcher.onDidDelete(onMapChange));
 }
 
 export function deactivate(): void {

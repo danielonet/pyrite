@@ -11,8 +11,8 @@ import { splitLogicalLines } from '../translator/rules/logicalLines';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { globToRegExp, isExcluded, isPackageMarkerOnly, javaLineFor, javaPathFor, mirrorFile, pythonLineFor } from '../mirror';
-import { createTranslator, moduleClassName } from '../translator';
+import { FAILURE_MARKER, globToRegExp, isExcluded, isPackageMarkerOnly, javaLineFor, javaPathFor, mirrorFile, pythonLineFor, removeMirroredFolder } from '../mirror';
+import { Translator, createTranslator, moduleClassName } from '../translator';
 
 function java(source: string, relativePath = 'pkg/mod.py'): string {
   return translateWithRules({ source, relativePath }).java;
@@ -563,4 +563,149 @@ test('package module: named after its folder, Javadoc names the original __init_
   contains(noDoc, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class Inventory {");
   const none = translateWithRules({ source: src, relativePath: 'app/inventory/__init__.py', javadocMode: 'none' }).java;
   contains(none, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class Inventory {");
+});
+
+function lombok(source: string, relativePath = 'pkg/mod.py'): string {
+  return translateWithRules({ source, relativePath, lombokStyle: true }).java;
+}
+
+/** Every `{` in the output has a matching `}` (comments and string literals are stripped first). */
+function assertBracesBalanced(out: string): void {
+  const code = out.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  const opens = (code.match(/\{/g) ?? []).length;
+  const closes = (code.match(/\}/g) ?? []).length;
+  assert.equal(opens, closes, `unbalanced braces (${opens} open, ${closes} close):\n${out}`);
+}
+
+test('regression: a keyword-only or positional-only marker in __init__ no longer crashes Lombok style', () => {
+  const src = `
+class Service:
+    def __init__(self, repo, *, currency: str = "EUR"):
+        self.repo = repo
+        self.currency = currency
+
+class Point:
+    def __init__(self, x, /, y):
+        self.x = x
+        self.y = y
+
+class Bag:
+    def __init__(self, *items, **options):
+        self.items = items
+        self.options = options
+`;
+  const out = lombok(src);
+  contains(out, 'public Service(Object repo, String currency /* = "EUR" */) {');
+  // The positional-only marker is just a separator: the constructor is still pure boilerplate.
+  contains(out, '@AllArgsConstructor\n    public static class Point {');
+  // Varargs/kwargs constructors have no @AllArgsConstructor shape and stay spelled out.
+  contains(out, 'public Bag(Object... items, Map<String, Object> options /* **kwargs */) {');
+  assert.ok(!/@AllArgsConstructor\n    public static class Bag/.test(out));
+});
+
+test('regression: every match/case arm is closed before the next one opens', () => {
+  const out = java(`
+def route(cmd):
+    match cmd:
+        case "go":
+            return 1
+        case ["x", y]:
+            return y
+        case _:
+            return 0
+`);
+  contains(out, 'case "go" -> {\n                return 1;\n            }\n            case List.of("x", y) -> {');
+  contains(out, 'return y;\n            }\n            default -> {');
+  assertBracesBalanced(out);
+});
+
+test('regression: a docstring containing */ does not end the Javadoc or block comment early', () => {
+  const src = ['def find():', '    """Match \'a*/b\' and end."""', '    return 1', ''].join('\n');
+  const withJavadoc = java(src);
+  contains(withJavadoc, "Match 'a*&#47;b' and end.");
+  assert.ok(!withJavadoc.includes('a*/b'), withJavadoc);
+  const plain = translateWithRules({ source: src, relativePath: 'pkg/mod.py', javadocMode: 'none' }).java;
+  contains(plain, "/* Match 'a*&#47;b' and end. */");
+});
+
+test('regression: cls is the class inside method bodies, so cls(...) becomes new C(...)', () => {
+  const out = java(`
+class C:
+    @classmethod
+    def of(cls, a):
+        return cls(a)
+
+    def copy(self):
+        def inner():
+            return cls.of(1)
+        return inner()
+`);
+  contains(out, 'return new C(a);');
+  contains(out, 'return C.of(1);');
+});
+
+test('regression: negative slice bounds count from the end', () => {
+  assert.equal(translateExpression('xs[-2:]'), 'xs.subList(xs.size() - 2, xs.size())');
+  assert.equal(translateExpression('xs[1:-1]'), 'xs.subList(1, xs.size() - 1)');
+  assert.equal(translateExpression('xs[:3]'), 'xs.subList(0, 3)');
+  assert.equal(translateExpression('xs[-1]'), 'xs.get(xs.size() - 1)');
+});
+
+test('regression: < and > are comparisons, not brackets, when splitting at top level', () => {
+  const out = java(`
+def cmp(a, b):
+    return a > b, a < b
+`);
+  contains(out, 'return Tuple.of(a > b, a < b);');
+  // Generic type hints still translate: the [] brackets do the nesting.
+  assert.equal(translateType('dict[str, list[int]]'), 'Map<String, List<Integer>>');
+});
+
+test('a failed translation writes a placeholder view instead of leaving the old one', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-fail-'));
+  try {
+    fs.mkdirSync(path.join(root, 'pkg'));
+    fs.writeFileSync(path.join(root, 'pkg', 'mod.py'), 'x = 1\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    const first = await mirrorFile(translator, root, 'pkg/mod.py');
+    assert.equal(first.skipped, false);
+    const javaAbs = path.join(root, '.java-view', 'pkg', 'mod.java');
+    contains(fs.readFileSync(javaAbs, 'utf8'), 'static int x = 1;');
+
+    const broken: Translator = { name: 'rules', translate: async () => { throw new Error('boom on line 3'); } };
+    await assert.rejects(mirrorFile(broken, root, 'pkg/mod.py'), /boom on line 3/);
+    const view = fs.readFileSync(javaAbs, 'utf8');
+    contains(view, FAILURE_MARKER);
+    contains(view, 'boom on line 3');
+    contains(view, 'package pkg;');
+    contains(view, 'public final class Mod {');
+    assert.ok(!view.includes('static int x = 1;'), 'the stale code must be gone');
+    const map = JSON.parse(fs.readFileSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'mod.java.json'), 'utf8'));
+    assert.deepEqual(map.symbols, []);
+    assert.deepEqual(map.lines, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('removeMirroredFolder deletes the mirrored subtree and its maps, and nothing else', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-rmdir-'));
+  try {
+    fs.mkdirSync(path.join(root, 'app', 'old'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'app', 'old', 'a.py'), 'x = 1\n', 'utf8');
+    fs.writeFileSync(path.join(root, 'app', 'keep.py'), 'y = 2\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    await mirrorFile(translator, root, 'app/old/a.py');
+    await mirrorFile(translator, root, 'app/keep.py');
+    removeMirroredFolder(root, 'app/old/');
+    assert.equal(fs.existsSync(path.join(root, '.java-view', 'app', 'old')), false);
+    assert.equal(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'app', 'old')), false);
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'keep.java')));
+    // Guard rails: never wipe the output root or escape it.
+    removeMirroredFolder(root, '');
+    removeMirroredFolder(root, '../elsewhere');
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'keep.java')));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

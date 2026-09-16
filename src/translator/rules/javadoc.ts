@@ -84,7 +84,8 @@ export function returnTag(pythonName: string, javaReturnType: string, isCtor: bo
 
 /** Render a Javadoc comment's lines (including the comment delimiters) from a description and tags. */
 export function renderJavadoc(description: string[], paramTags: string[] = [], returnTagLine?: string): string[] {
-  const body: string[] = [...description];
+  // A literal `*/` in a docstring (glob patterns, comment examples) would end the Javadoc early.
+  const body: string[] = description.map((line) => line.replace(/\*\//g, '*&#47;'));
   const tags = returnTagLine ? [...paramTags, returnTagLine] : [...paramTags];
   if (tags.length) {
     if (body.length) body.push('');

@@ -68,14 +68,18 @@ export function boxed(t: string): string {
   return BOXED[t] ?? t;
 }
 
-/** Split a comma separated list at bracket depth 0. */
+/**
+ * Split a comma separated list at bracket depth 0. Only `[] () {}` nest: in Python `<` and `>`
+ * are comparison operators (`return a > b, c`), and by the time Java generics exist in the text
+ * they are never split again.
+ */
 export function splitTopLevel(text: string, separator = ','): string[] {
   const parts: string[] = [];
   let depth = 0;
   let current = '';
   for (const ch of text) {
-    if (ch === '[' || ch === '(' || ch === '{' || ch === '<') depth += 1;
-    else if (ch === ']' || ch === ')' || ch === '}' || ch === '>') depth -= 1;
+    if (ch === '[' || ch === '(' || ch === '{') depth += 1;
+    else if (ch === ']' || ch === ')' || ch === '}') depth -= 1;
     if (ch === separator && depth === 0) {
       parts.push(current.trim());
       current = '';

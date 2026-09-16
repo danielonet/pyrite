@@ -6,6 +6,7 @@
  * Pure Node (no vscode dependency) so it can be tested directly.
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
 import { Worker } from 'worker_threads';
 import { MirrorOptions, MirrorSummary, mirrorProject } from './mirror';
@@ -38,12 +39,14 @@ export type ProgressCallback = (relativePath: string, index: number, total: numb
 /** Compiled worker entry point, next to this file in out/. */
 const WORKER_FILE = path.join(__dirname, 'mirrorWorker.js');
 
-export function runMirrorInBackground(input: BackgroundMirrorInput, onProgress?: ProgressCallback): BackgroundMirror {
+export function runMirrorInBackground(input: BackgroundMirrorInput, onProgress?: ProgressCallback, workerFile = WORKER_FILE): BackgroundMirror {
+  // A missing worker script is reported asynchronously by Worker, not thrown, so check up front;
+  // without the worker, run in-process: mirrorProject yields between files, so the host still stays responsive.
+  if (!fs.existsSync(workerFile)) return runMirrorInProcess(input, onProgress);
   let worker: Worker;
   try {
-    worker = new Worker(WORKER_FILE, { workerData: input });
+    worker = new Worker(workerFile, { workerData: input });
   } catch {
-    // No worker threads available: run in-process. mirrorProject yields between files, so the host still stays responsive.
     return runMirrorInProcess(input, onProgress);
   }
 

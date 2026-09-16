@@ -130,7 +130,7 @@ function inferTypeFromMaskedValue(masked: string, literals: string[]): string {
   const v = masked.trim();
   if (/^-?\d+$/.test(v)) return 'int';
   if (/^-?\d*\.\d+(e-?\d+)?$/i.test(v)) return 'double';
-  if (isSingleLiteral(v)) return literals.length && literals[0].startsWith('"""') ? 'String' : 'String';
+  if (isSingleLiteral(v)) return 'String';
   if (v === 'True' || v === 'False') return 'boolean';
   if (v === 'None') return 'Object /* nullable */';
   if (/^\[/.test(v) || /^list\(/.test(v)) return 'List<Object>';
@@ -230,8 +230,16 @@ class RuleTranslation {
     return undefined;
   }
 
+  /** Nearest enclosing class, looking through def frames too (for `cls` inside method bodies). */
+  private nearestClass(): Block | undefined {
+    for (let i = this.stack.length - 1; i >= 0; i -= 1) {
+      if (this.stack[i].kind === 'class') return this.stack[i];
+    }
+    return undefined;
+  }
+
   private exprCtx() {
-    return { className: this.enclosingClass()?.className };
+    return { className: this.nearestClass()?.className };
   }
 
   /** Enclosing class names, outermost first, always starting with the module class. */
@@ -449,7 +457,9 @@ class RuleTranslation {
       return;
     }
 
-    const continuation = /^(elif\b|else\b|except\b|finally\b|case\b)/.test(code);
+    // `case` is not a continuation like `else`/`except`: each case arm is its own `{ ... }`,
+    // so the previous arm must be closed with a normal `}` before the next one opens.
+    const continuation = /^(elif\b|else\b|except\b|finally\b)/.test(code);
     this.closeBlocksTo(line.indent, continuation);
     if (continuation) {
       // Comments between a block and its else/except belong inside the closing block.
@@ -732,9 +742,11 @@ class RuleTranslation {
     if (!isRecord) {
       const ctor = defs.find((d) => d.name === '__init__');
       if (ctor) {
-        const ctorParams = ctor.params.filter((p) => p !== 'self');
+        // `*` and `/` only separate keyword-only / positional-only parameters; they bind nothing.
+        const ctorParams = ctor.params.filter((p) => p !== 'self' && p !== '*' && p !== '/');
+        // Plain `name` or `name: Type` only: a default, `*args` or `**kwargs` has no @AllArgsConstructor equivalent.
         const simpleParams = ctorParams.every((p) => /^\w+(\s*:\s*[^=]+)?$/.test(p));
-        const paramNames = ctorParams.map((p) => /^(\w+)/.exec(p)![1]);
+        const paramNames = ctorParams.map((p) => /^(\w+)/.exec(p)?.[1] ?? '');
         if (paramNames.length && simpleParams && paramNames.length === fields.length && this.docstringAfter(ctor.index) < 0) {
           const body = this.bodyLines(ctor.index);
           const isBoilerplate =
@@ -1150,7 +1162,7 @@ class RuleTranslation {
     if ((m = /^yield\s*(.*)$/.exec(code))) return this.emit(`yield ${m[1] ? ex(m[1]) : 'null'}; // generator${comment}`, py);
     if (isSingleLiteral(code)) {
       // Stray string expression (e.g. a docstring not directly under a header): keep as comment.
-      const text = un(code).replace(/^"""\n?/, '').replace(/"""$/, '').replace(/^"|"$/g, '');
+      const text = un(code).replace(/^"""\n?/, '').replace(/"""$/, '').replace(/^"|"$/g, '').replace(/\*\//g, '*&#47;');
       const lines = text.split('\n');
       if (lines.length === 1) return this.emit(`/* ${lines[0]} */`, py);
       this.emit('/*', py);

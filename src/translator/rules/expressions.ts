@@ -214,7 +214,9 @@ function rewriteBrackets(text: string): string {
           out += `.reversed()`;
         } else {
           const recv = receiver || 'seq';
-          out += `.subList(${lo || '0'}, ${hi || `${recv}.size()`})`;
+          // Python counts negative bounds from the end: xs[-2:] -> subList(xs.size() - 2, xs.size()).
+          const bound = (v: string, dflt: string) => (v === '' ? dflt : /^-\d+$/.test(v) ? `${recv}.size() - ${v.slice(1)}` : v);
+          out += `.subList(${bound(lo, '0')}, ${bound(hi, `${recv}.size()`)})`;
           void a;
           void b;
         }

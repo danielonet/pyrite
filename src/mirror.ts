@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { JavadocMode, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName } from './translator';
+import { JavadocMode, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath } from './translator';
 import { splitLogicalLines } from './translator/rules/logicalLines';
 import { isSingleLiteral, maskStrings } from './translator/rules/strings';
 
@@ -21,6 +21,11 @@ export interface MirrorOptions {
   outputFolder?: string;
   /** Glob-like patterns (minimal: supports ** and *) of paths to skip, relative to root. */
   exclude?: string[];
+  /**
+   * Only mirror Python files under this folder (relative to root, forward slashes, e.g. "app/services").
+   * Output paths stay relative to root, so a scoped run writes the same files a full run would.
+   */
+  subfolder?: string;
   /** Javadoc generation mode for classes/methods (default "docstringOnly"). */
   javadocMode?: JavadocMode;
   /** Whether test code follows the same javadocMode as production code (default false: never documented). */
@@ -119,11 +124,30 @@ export function yieldToEventLoop(): Promise<void> {
 }
 
 /**
+ * Normalize a subfolder scope to a root-relative path with forward slashes and no
+ * leading/trailing slash ("" means the whole root). Throws when it points outside root.
+ */
+export function normalizeSubfolder(root: string, subfolder: string | undefined): string {
+  if (!subfolder) return '';
+  const abs = path.resolve(root, subfolder);
+  const rel = path.relative(root, abs);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`Subfolder is outside the project root: ${subfolder}`);
+  return rel.split(path.sep).join('/');
+}
+
+/**
  * Non-blocking variant of `listPythonFiles`: reads directories asynchronously, so walking
  * a huge tree never stalls the thread, and stops early once `isCancelled` returns true.
+ * With `subfolder`, only that part of the tree is read; returned paths stay relative to root.
  */
-export async function listPythonFilesAsync(root: string, exclude: string[] = DEFAULT_EXCLUDES, isCancelled?: () => boolean): Promise<string[]> {
+export async function listPythonFilesAsync(root: string, exclude: string[] = DEFAULT_EXCLUDES, isCancelled?: () => boolean, subfolder?: string): Promise<string[]> {
   const results: string[] = [];
+  const scope = normalizeSubfolder(root, subfolder);
+  // A scope that is itself excluded (e.g. node_modules/pkg) has nothing to mirror.
+  if (scope && scope.split('/').some((_part, i, parts) => {
+    const prefix = parts.slice(0, i + 1).join('/');
+    return isExcluded(`${prefix}/`, exclude) || isExcluded(prefix, exclude);
+  })) return results;
   const walk = async (dir: string): Promise<void> => {
     if (isCancelled?.()) return;
     let entries: fs.Dirent[];
@@ -144,7 +168,7 @@ export async function listPythonFilesAsync(root: string, exclude: string[] = DEF
       }
     }
   };
-  await walk(root);
+  await walk(scope ? path.join(root, scope) : root);
   return results.sort();
 }
 
@@ -234,26 +258,67 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
   }
   // Earlier versions wrote package modules under other names; drop those so they don't linger next to the current file.
   if (isInitModule(relativePython)) removeLegacyInitViews(root, relativePython, outputFolder);
-  const result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
+  let result: TranslateResult;
+  try {
+    result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
+  } catch (err) {
+    // Never leave the previous view in place: a reader would take outdated code for current.
+    writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name);
+    throw err;
+  }
+  const javaAbs = writeView(root, relativePython, outputFolder, result.java, result.sourceMap, result.symbols, result.engine);
+  return { skipped: false, javaAbs, result };
+}
 
+/** Write the Java view and its sidecar map; returns the absolute Java path. */
+function writeView(root: string, relativePython: string, outputFolder: string, java: string, lines: number[], symbols: SymbolInfo[], engine: string): string {
   const outRoot = path.join(root, outputFolder);
   const javaRel = javaPathFor(relativePython);
   const javaAbs = path.join(outRoot, javaRel);
   fs.mkdirSync(path.dirname(javaAbs), { recursive: true });
-  fs.writeFileSync(javaAbs, result.java, 'utf8');
-
-  const map: SourceMapFile = {
-    python: relativePython,
-    java: `${outputFolder}/${javaRel}`,
-    engine: result.engine,
-    generatedAt: new Date().toISOString(),
-    lines: result.sourceMap,
-    symbols: result.symbols,
-  };
+  fs.writeFileSync(javaAbs, java, 'utf8');
+  const map: SourceMapFile = { python: relativePython, java: `${outputFolder}/${javaRel}`, engine, generatedAt: new Date().toISOString(), lines, symbols };
   const mapAbs = path.join(outRoot, mapPathFor(relativePython));
   fs.mkdirSync(path.dirname(mapAbs), { recursive: true });
   fs.writeFileSync(mapAbs, JSON.stringify(map), 'utf8');
-  return { skipped: false, javaAbs, result };
+  return javaAbs;
+}
+
+/** Marker text written when a file fails to translate. */
+export const FAILURE_MARKER = 'TRANSLATION FAILED';
+
+/** The Java view written for a file the translator could not handle: says so instead of showing stale code. */
+export function failureView(relativePython: string, engine: string, err: unknown): string {
+  const message = (err instanceof Error ? err.message : String(err)).replace(/\*\//g, '*&#47;').split('\n')[0];
+  const pkg = packageFromPath(relativePython);
+  return [
+    `// Java view of ${relativePython}`,
+    `// Generated by Pyrite (${engine} engine). Read-only reading aid: edit the Python source instead.`,
+    '//',
+    `// ${FAILURE_MARKER}: this file could not be translated, so no code is shown rather than an outdated view.`,
+    `// ${message}`,
+    '// Fix or simplify the Python construct on the line the error points at, or report it as a Pyrite bug.',
+    ...(pkg ? [`package ${pkg};`] : []),
+    '',
+    `public final class ${moduleClassName(relativePython)} {`,
+    `    // ${FAILURE_MARKER}: ${message}`,
+    '}',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Remove every Java view + map under a deleted Python folder (relative to root, forward slashes).
+ * Nothing happens when the folder had no mirrored files.
+ */
+export function removeMirroredFolder(root: string, relativeDir: string, outputFolder = '.java-view'): void {
+  const dir = relativeDir.replace(/\/+$/, '');
+  if (!dir || dir === '.' || dir.startsWith('..')) return;
+  const outRoot = path.join(root, outputFolder);
+  for (const rel of [dir, `${MAP_DIR}/${dir}`]) {
+    const abs = path.join(outRoot, rel);
+    if (fs.existsSync(abs)) fs.rmSync(abs, { recursive: true, force: true });
+  }
 }
 
 /** Remove the Java view + map for a deleted Python file. */
@@ -288,7 +353,7 @@ function removeLegacyInitViews(root: string, relativePython: string, outputFolde
 export async function mirrorProject(translator: Translator, options: MirrorOptions): Promise<MirrorSummary> {
   const outputFolder = options.outputFolder ?? '.java-view';
   const exclude = options.exclude ?? DEFAULT_EXCLUDES;
-  const files = await listPythonFilesAsync(options.root, exclude, options.isCancelled);
+  const files = await listPythonFilesAsync(options.root, exclude, options.isCancelled, options.subfolder);
   const warnings: string[] = [];
   let count = 0;
   let skipped = 0;
@@ -364,6 +429,8 @@ so that Java developers can read and review them. It was generated by the
   Edit the \`.py\` file instead (use *Pyrite: Go to Python Source*, Ctrl+Alt+J).
 - The code is a *reading aid*: it keeps Python names and structure and is not meant to compile.
 - Constructs without a Java equivalent are kept and annotated with \`/* ... */\` comments.
+- A file the translator could not handle gets a placeholder marked \`TRANSLATION FAILED\` with the
+  reason, never an outdated view of an earlier version.
 - An \`__init__.py\` that only marks a package (docstring, comments, \`__all__\`) gets no Java file:
   Java packages are plain folders. One with real content (constants, re-exports, setup code) is mirrored
   as a class named after its folder, e.g. \`inventory/__init__.py\` -> \`public final class Inventory\`;

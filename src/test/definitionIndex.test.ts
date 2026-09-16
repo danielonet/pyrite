@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { buildSymbolIndex, enclosingClassAt, resolveDefinition } from '../definitionIndex';
+import { SymbolIndexCache, buildSymbolIndex, enclosingClassAt, resolveDefinition } from '../definitionIndex';
 import { MAP_DIR, SourceMapFile } from '../mirror';
 
 function writeMap(root: string, outputFolder: string, map: SourceMapFile): void {
@@ -94,4 +94,64 @@ test('resolveDefinition prefers the nested class over the module\'s own wrapper 
   const resolved = resolveDefinition(symbols, 'OrderService', 'caller.java', 0);
   assert.equal(resolved.length, 1);
   assert.deepEqual(resolved[0].container, ['OrderService']);
+});
+
+function classMap(javaRel: string, className: string): SourceMapFile {
+  return {
+    python: javaRel.replace(/\.java$/, '.py'),
+    java: `.java-view/${javaRel}`,
+    engine: 'rules',
+    generatedAt: '',
+    lines: [],
+    symbols: [{ name: className, kind: 'class', container: [], javaLine: 5, pythonLine: 1 }],
+  };
+}
+
+test('SymbolIndexCache reads once, then re-reads only what it is told changed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-idxcache-'));
+  try {
+    writeMap(root, '.java-view', classMap('a.java', 'Alpha'));
+    writeMap(root, '.java-view', classMap('pkg/b.java', 'Beta'));
+    const cache = new SymbolIndexCache(root, '.java-view');
+    const names = async () => (await cache.get()).map((s) => s.name).sort();
+
+    const [first, concurrent] = await Promise.all([cache.get(), cache.get()]);
+    assert.equal(first, concurrent, 'concurrent callers share one build');
+    assert.deepEqual(await names(), ['Alpha', 'Beta']);
+    assert.equal(await cache.get(), first, 'an unchanged index is served from memory');
+
+    // Rewrite both maps but only report one: the unreported one must not be re-read.
+    writeMap(root, '.java-view', classMap('a.java', 'AlphaV2'));
+    writeMap(root, '.java-view', classMap('pkg/b.java', 'BetaV2'));
+    cache.invalidatePython('a.py');
+    assert.deepEqual(await names(), ['AlphaV2', 'Beta']);
+
+    // A deleted map disappears from the index.
+    const bMap = path.join(cache.mapsRoot, 'pkg', 'b.java.json');
+    fs.rmSync(bMap);
+    cache.invalidateMap(bMap);
+    assert.deepEqual(await names(), ['AlphaV2']);
+
+    // A full invalidation picks up files nobody reported.
+    writeMap(root, '.java-view', classMap('c.java', 'Gamma'));
+    cache.invalidateAll();
+    assert.deepEqual(await names(), ['AlphaV2', 'Gamma']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SymbolIndexCache does not cache a build that raced with a change', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-idxrace-'));
+  try {
+    writeMap(root, '.java-view', classMap('a.java', 'Alpha'));
+    const cache = new SymbolIndexCache(root, '.java-view');
+    const building = cache.get();
+    writeMap(root, '.java-view', classMap('a.java', 'AlphaV2'));
+    cache.invalidatePython('a.py'); // arrives while the first build is still reading
+    await building;
+    assert.deepEqual((await cache.get()).map((s) => s.name), ['AlphaV2']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
