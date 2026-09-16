@@ -18,7 +18,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { createTranslator, EngineName, JavadocMode, Translator } from './translator';
-import { javaLineFor, javaPathFor, mirrorFile, mirrorProject, pythonLineFor, readSourceMap, removeMirroredFile, isExcluded } from './mirror';
+import { javaLineFor, javaPathFor, mirrorFile, pythonLineFor, readSourceMap, removeMirroredFile, isExcluded } from './mirror';
+import { runMirrorInBackground } from './backgroundMirror';
 import { buildSymbolIndex, resolveDefinition } from './definitionIndex';
 import { PyriteAboutViewProvider } from './aboutView';
 
@@ -84,31 +85,52 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
     return;
   }
   const s = settings();
-  const translator = buildTranslator();
   const scopeRoot = folderUri && fs.statSync(folderUri.fsPath).isDirectory() ? folderUri.fsPath : root.uri.fsPath;
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Pyrite: generating Java view', cancellable: true },
     async (progress, token) => {
       const started = Date.now();
-      // When invoked on a sub-folder, translate only that folder but keep paths relative to the workspace root.
-      const summary = await mirrorProject(translator, {
-        root: root.uri.fsPath,
-        outputFolder: s.outputFolder,
-        exclude: [...s.exclude, ...(scopeRoot !== root.uri.fsPath ? [] : [])],
-        javadocMode: s.javadoc,
-        documentTestCode: s.javadocTestCode,
-        lombokStyle: s.lombok,
-        isCancelled: () => token.isCancellationRequested,
-        onProgress: (rel, i, total) => {
-          if (scopeRoot !== root.uri.fsPath && !path.join(root.uri.fsPath, rel).startsWith(scopeRoot)) return;
-          progress.report({ message: `${i + 1}/${total} ${rel}`, increment: 100 / Math.max(total, 1) });
+      // The translation runs on a worker thread so a large project never freezes the extension host;
+      // this thread only relays progress (at most every 100 ms) and the Cancel button.
+      let reported = 0;
+      const run = runMirrorInBackground(
+        {
+          engine: s.engine,
+          options: {
+            root: root.uri.fsPath,
+            outputFolder: s.outputFolder,
+            exclude: [...s.exclude, ...(scopeRoot !== root.uri.fsPath ? [] : [])],
+            javadocMode: s.javadoc,
+            documentTestCode: s.javadocTestCode,
+            lombokStyle: s.lombok,
+          },
         },
-      });
+        (rel, i, total) => {
+          if (scopeRoot !== root.uri.fsPath && !path.join(root.uri.fsPath, rel).startsWith(scopeRoot)) return;
+          const percent = ((i + 1) / Math.max(total, 1)) * 100;
+          progress.report({ message: `${i + 1}/${total} ${rel}`, increment: percent - reported });
+          reported = percent;
+        },
+      );
+      const cancelListener = token.onCancellationRequested(() => run.cancel());
+      let summary;
+      try {
+        summary = await run.result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        output.appendLine(`error: generating the Java view failed: ${msg}`);
+        void vscode.window.showErrorMessage(`Pyrite: generating the Java view failed: ${msg}`);
+        return;
+      } finally {
+        cancelListener.dispose();
+      }
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       output.appendLine(`Generated ${summary.files} file(s) in ${summary.outputRoot} (${summary.engine} engine, ${secs}s${summary.skipped ? `, ${summary.skipped} package-marker __init__.py skipped` : ''}).`);
       for (const w of summary.warnings) output.appendLine(`  warning: ${w}`);
-      const msg = `Pyrite: ${summary.files} file(s) translated to ${s.outputFolder}/ (${summary.engine} engine)` + (summary.warnings.length ? `, ${summary.warnings.length} warning(s)` : '');
+      const msg =
+        (summary.cancelled ? `Pyrite: cancelled after ${summary.files} file(s) translated to ${s.outputFolder}/` : `Pyrite: ${summary.files} file(s) translated to ${s.outputFolder}/ (${summary.engine} engine)`) +
+        (summary.warnings.length ? `, ${summary.warnings.length} warning(s)` : '');
       const pick = await vscode.window.showInformationMessage(msg, 'Open folder', summary.warnings.length ? 'Show warnings' : 'OK');
       if (pick === 'Open folder') {
         await vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(summary.outputRoot));
