@@ -2,7 +2,7 @@
   "name": "pyrite",
   "displayName": "Pyrite",
   "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "danielonnet",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -154,18 +154,13 @@
             "docstringOnly",
             "none"
           ],
-          "enumItemLabels": [
-            "Always",
-            "Only when documented",
-            "Never"
-          ],
           "enumDescriptions": [
-            "Every class and method gets Javadoc, written from its name if it has no docstring.",
-            "Only classes and methods with a Python docstring get Javadoc.",
-            "No Javadoc. Docstrings stay as plain comments."
+            "Always generate Javadoc for every class and method. When there is no docstring, the description is extrapolated from the name and @param/@return from the signature.",
+            "Only generate Javadoc for a class or method that has documentation in the Python code (still adding @param/@return); everything else gets no Javadoc. (default)",
+            "Never generate Javadoc. Docstrings are kept as plain comments instead, like any other construct without a clean Java equivalent."
           ],
           "default": "docstringOnly",
-          "markdownDescription": "How much Javadoc to generate in the Java view.\n\n- **Always**: every class and method, written from its name if it has no docstring.\n- **Only when documented** (default): only classes and methods with a Python docstring.\n- **Never**: no Javadoc. Docstrings stay as plain comments."
+          "description": "How much Javadoc to generate for classes and methods in the Java view."
         },
         "pyrite.javadocTestCode": {
           "type": "boolean",
