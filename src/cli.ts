@@ -99,7 +99,8 @@ async function main(): Promise<void> {
     },
   });
   for (const w of summary.warnings) console.error(`warning: ${w}`);
-  console.error(`Wrote ${summary.files} file(s) to ${summary.outputRoot} using the ${summary.engine} engine.`);
+  const skipped = summary.skipped ? ` Skipped ${summary.skipped} __init__.py file(s) that only mark a package.` : '';
+  console.error(`Wrote ${summary.files} file(s) to ${summary.outputRoot} using the ${summary.engine} engine.${skipped}`);
 }
 
 main().catch((err) => {

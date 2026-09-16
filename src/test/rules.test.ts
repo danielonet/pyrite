@@ -8,7 +8,11 @@ import { translateWithRules } from '../translator/rules/ruleTranslator';
 import { translateExpression } from '../translator/rules/expressions';
 import { translateType } from '../translator/rules/typeHints';
 import { splitLogicalLines } from '../translator/rules/logicalLines';
-import { globToRegExp, isExcluded, javaLineFor, pythonLineFor } from '../mirror';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { globToRegExp, isExcluded, isPackageMarkerOnly, javaLineFor, javaPathFor, mirrorFile, pythonLineFor } from '../mirror';
+import { createTranslator, moduleClassName } from '../translator';
 
 function java(source: string, relativePath = 'pkg/mod.py'): string {
   return translateWithRules({ source, relativePath }).java;
@@ -487,4 +491,76 @@ test('mirror helpers: globs and line lookups', () => {
   assert.equal(pythonLineFor(map, 6), 4);
   assert.equal(javaLineFor(map, 3), 4);
   assert.equal(javaLineFor(map, 2), 4); // nearest following mapped line
+});
+
+test('isPackageMarkerOnly: __init__.py with only docstring/comments/__all__ is a bare package marker', () => {
+  assert.equal(isPackageMarkerOnly('pkg/__init__.py', ''), true);
+  assert.equal(isPackageMarkerOnly('pkg/__init__.py', '\"\"\"Inventory domain package.\"\"\"\n'), true);
+  assert.equal(isPackageMarkerOnly('pkg/__init__.py', '# nothing here\n\n\"\"\"Doc\nspanning lines.\"\"\"\n__all__ = [\n    "models",\n    "services",\n]\n'), true);
+  assert.equal(isPackageMarkerOnly('pkg/__init__.py', '__all__: list[str] = ["models"]\n'), true);
+  // Real content keeps the file.
+  assert.equal(isPackageMarkerOnly('pkg/__init__.py', '\"\"\"Doc.\"\"\"\n__version__ = "0.1.0"\n__all__ = ["models"]\n'), false);
+  assert.equal(isPackageMarkerOnly('pkg/__init__.py', 'from .models import Item\n'), false);
+  assert.equal(isPackageMarkerOnly('pkg/__init__.py', 'def setup():\n    pass\n'), false);
+  // Only __init__.py is ever a marker.
+  assert.equal(isPackageMarkerOnly('pkg/mod.py', ''), false);
+  assert.equal(isPackageMarkerOnly('pkg/mod.py', '\"\"\"Doc.\"\"\"\n'), false);
+});
+
+test('mirrorFile skips a bare __init__.py and removes its stale Java view', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-init-'));
+  try {
+    fs.mkdirSync(path.join(root, 'pkg'), { recursive: true });
+    const { translator } = createTranslator({ engine: 'rules' });
+    const init = path.join(root, 'pkg', '__init__.py');
+
+    fs.writeFileSync(init, '__version__ = "1.0"\n', 'utf8');
+    const first = await mirrorFile(translator, root, 'pkg/__init__.py');
+    assert.equal(first.skipped, false);
+    const javaAbs = path.join(root, '.java-view', 'pkg', 'pkgInit.java');
+    assert.ok(fs.existsSync(javaAbs));
+    contains(fs.readFileSync(javaAbs, 'utf8'), 'public final class Pkg {');
+    // Leftovers from the names earlier versions used are cleaned up too.
+    const legacy = ['__init__.java', 'Pkg.java', 'PkgPackage.java'].map((n) => path.join(root, '.java-view', 'pkg', n));
+    for (const abs of legacy) fs.writeFileSync(abs, '// stale', 'utf8');
+    await mirrorFile(translator, root, 'pkg/__init__.py');
+    for (const abs of legacy) assert.equal(fs.existsSync(abs), false, `legacy ${path.basename(abs)} should be removed`);
+    assert.ok(fs.existsSync(javaAbs), 'the current view must survive the cleanup');
+
+    fs.writeFileSync(init, '\"\"\"Just a package.\"\"\"\n', 'utf8');
+    const second = await mirrorFile(translator, root, 'pkg/__init__.py');
+    assert.equal(second.skipped, true);
+    assert.equal(fs.existsSync(javaAbs), false, 'stale Java view should be removed');
+    assert.equal(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'pkgInit.java.json')), false, 'stale map should be removed');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('package module: named after its folder, Javadoc names the original __init__.py', () => {
+  assert.equal(moduleClassName('app/inventory/__init__.py'), 'Inventory');
+  assert.equal(moduleClassName('app/order_service.py'), 'OrderService');
+  assert.equal(moduleClassName('__init__.py'), 'Init');
+  assert.equal(javaPathFor('app/inventory/__init__.py'), 'app/inventory/inventoryInit.java');
+  assert.equal(javaPathFor('app/order_items/__init__.py'), 'app/order_items/orderItemsInit.java');
+  assert.equal(moduleClassName('app/order_items/__init__.py'), 'OrderItems');
+  assert.equal(javaPathFor('app/order_service.py'), 'app/order_service.java');
+  // The Init suffix keeps the file distinct from a sibling module on a case-insensitive filesystem.
+  assert.notEqual(
+    javaPathFor('app/inventory/__init__.py').toLowerCase(),
+    javaPathFor('app/inventory/inventory.py').toLowerCase(),
+  );
+
+  const src = '\"\"\"Inventory domain package.\"\"\"\n__version__ = "0.1.0"\n';
+  const withDoc = java(src, 'app/inventory/__init__.py');
+  contains(withDoc, 'public final class Inventory {');
+  contains(withDoc, ' * Inventory domain package.');
+  contains(withDoc, " * Translated from {@code app/inventory/__init__.py}, the {@code inventory} package's __init__ module.");
+  assert.ok(!withDoc.includes('InventoryPackage'));
+
+  // Without a docstring in docstringOnly mode there is no Javadoc, so the origin goes in a plain comment.
+  const noDoc = java('__version__ = "0.1.0"\n', 'app/inventory/__init__.py');
+  contains(noDoc, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class Inventory {");
+  const none = translateWithRules({ source: src, relativePath: 'app/inventory/__init__.py', javadocMode: 'none' }).java;
+  contains(none, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class Inventory {");
 });

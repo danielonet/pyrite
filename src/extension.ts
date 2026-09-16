@@ -106,7 +106,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
         },
       });
       const secs = ((Date.now() - started) / 1000).toFixed(1);
-      output.appendLine(`Generated ${summary.files} file(s) in ${summary.outputRoot} (${summary.engine} engine, ${secs}s).`);
+      output.appendLine(`Generated ${summary.files} file(s) in ${summary.outputRoot} (${summary.engine} engine, ${secs}s${summary.skipped ? `, ${summary.skipped} package-marker __init__.py skipped` : ''}).`);
       for (const w of summary.warnings) output.appendLine(`  warning: ${w}`);
       const msg = `Pyrite: ${summary.files} file(s) translated to ${s.outputFolder}/ (${summary.engine} engine)` + (summary.warnings.length ? `, ${summary.warnings.length} warning(s)` : '');
       const pick = await vscode.window.showInformationMessage(msg, 'Open folder', summary.warnings.length ? 'Show warnings' : 'OK');
@@ -119,7 +119,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
   );
 }
 
-async function translateOne(pyUri: vscode.Uri, reveal: boolean): Promise<vscode.Uri | undefined> {
+async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): Promise<vscode.Uri | undefined> {
   const root = rootFor(pyUri);
   if (!root) return undefined;
   if (isInsideOutput(root, pyUri.fsPath)) return undefined;
@@ -130,7 +130,13 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean): Promise<vscode.
   statusItem.text = '$(sync~spin) Pyrite';
   statusItem.show();
   try {
-    const { javaAbs, result } = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok });
+    const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok });
+    if (outcome.skipped) {
+      // Only tell the user when they asked for this file explicitly, not on every watched save.
+      if (!quiet) void vscode.window.showInformationMessage(`Pyrite: ${rel} only marks a Python package (Java packages are plain folders), so it has no Java view.`);
+      return undefined;
+    }
+    const { javaAbs, result } = outcome;
     for (const w of result.warnings) output.appendLine(`warning: ${w}`);
     const javaUri = vscode.Uri.file(javaAbs);
     if (reveal) {
@@ -267,7 +273,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!root) return;
     const outDir = path.join(root.uri.fsPath, settings().outputFolder);
     if (!fs.existsSync(outDir)) return; // the user has not generated a view yet - stay quiet
-    await translateOne(uri, false);
+    await translateOne(uri, false, true);
   };
   context.subscriptions.push(
     watcher,

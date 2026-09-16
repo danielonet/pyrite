@@ -10,7 +10,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { JavadocMode, SymbolInfo, TranslateResult, Translator } from './translator';
+import { JavadocMode, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName } from './translator';
+import { splitLogicalLines } from './translator/rules/logicalLines';
+import { isSingleLiteral, maskStrings } from './translator/rules/strings';
 
 export interface MirrorOptions {
   /** Absolute path of the Python project root. */
@@ -32,7 +34,10 @@ export interface MirrorOptions {
 }
 
 export interface MirrorSummary {
+  /** Java files written. */
   files: number;
+  /** `__init__.py` files that only mark a package and therefore got no Java file (see `isPackageMarkerOnly`). */
+  skipped: number;
   warnings: string[];
   outputRoot: string;
   engine: string;
@@ -128,12 +133,41 @@ export function listPythonFiles(root: string, exclude: string[] = DEFAULT_EXCLUD
   return results.sort();
 }
 
+/**
+ * Java view path for a Python file: `app/order_service.py` -> `app/order_service.java`.
+ * A package module is named after its folder in lowerCamelCase plus an `Init` suffix,
+ * `app/inventory/__init__.py` -> `app/inventory/inventoryInit.java`: the suffix hints at the
+ * `__init__.py` origin and keeps the file from colliding with a sibling `inventory.py` on
+ * Windows/macOS, where file names are case-insensitive.
+ */
 export function javaPathFor(relativePython: string): string {
-  return relativePython.replace(/\.py$/, '.java');
+  const dir = relativePython.slice(0, relativePython.lastIndexOf('/') + 1);
+  return `${dir}${javaFileBaseName(relativePython)}.java`;
 }
 
 export function mapPathFor(relativePython: string): string {
   return `${MAP_DIR}/${javaPathFor(relativePython)}.json`;
+}
+
+/**
+ * True when `relativePython` is an `__init__.py` that exists only to make its folder a
+ * Python package: nothing in it but an optional docstring, comments and an `__all__` list.
+ * Java packages are plain folders, so such a file has no counterpart worth generating;
+ * an `__init__.py` with real content (constants, re-exports, setup code) is still mirrored.
+ */
+export function isPackageMarkerOnly(relativePython: string, source: string): boolean {
+  if (relativePython.split('/').pop() !== '__init__.py') return false;
+  let sawCode = false;
+  for (const line of splitLogicalLines(source)) {
+    if (line.kind !== 'code') continue;
+    const masked = maskStrings(line.text).text.trim();
+    const isDocstring = !sawCode && isSingleLiteral(masked);
+    sawCode = true;
+    if (isDocstring) continue;
+    if (/^__all__\s*(?::\s*[^=]+)?=/.test(masked)) continue;
+    return false;
+  }
+  return true;
 }
 
 export interface MirrorFileOptions {
@@ -143,11 +177,22 @@ export interface MirrorFileOptions {
   lombokStyle?: boolean;
 }
 
-/** Translate one Python file and write its Java view + source map. Returns the absolute Java path. */
-export async function mirrorFile(translator: Translator, root: string, relativePython: string, options: MirrorFileOptions = {}): Promise<{ javaAbs: string; result: TranslateResult }> {
+export type MirrorFileOutcome =
+  | { skipped: false; javaAbs: string; result: TranslateResult }
+  /** The file only marks a Python package (see `isPackageMarkerOnly`); any stale Java view for it was removed. */
+  | { skipped: true; javaAbs?: undefined; result?: undefined };
+
+/** Translate one Python file and write its Java view + source map. Returns the absolute Java path, or `skipped` for a bare package marker. */
+export async function mirrorFile(translator: Translator, root: string, relativePython: string, options: MirrorFileOptions = {}): Promise<MirrorFileOutcome> {
   const outputFolder = options.outputFolder ?? '.java-view';
   const pyAbs = path.join(root, relativePython);
   const source = fs.readFileSync(pyAbs, 'utf8');
+  if (isPackageMarkerOnly(relativePython, source)) {
+    removeMirroredFile(root, relativePython, outputFolder);
+    return { skipped: true };
+  }
+  // Earlier versions wrote package modules under other names; drop those so they don't linger next to the current file.
+  if (isInitModule(relativePython)) removeLegacyInitViews(root, relativePython, outputFolder);
   const result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
 
   const outRoot = path.join(root, outputFolder);
@@ -167,7 +212,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
   const mapAbs = path.join(outRoot, mapPathFor(relativePython));
   fs.mkdirSync(path.dirname(mapAbs), { recursive: true });
   fs.writeFileSync(mapAbs, JSON.stringify(map), 'utf8');
-  return { javaAbs, result };
+  return { skipped: false, javaAbs, result };
 }
 
 /** Remove the Java view + map for a deleted Python file. */
@@ -177,6 +222,26 @@ export function removeMirroredFile(root: string, relativePython: string, outputF
     const abs = path.join(outRoot, rel);
     if (fs.existsSync(abs)) fs.rmSync(abs);
   }
+  if (isInitModule(relativePython)) removeLegacyInitViews(root, relativePython, outputFolder);
+}
+
+/**
+ * Remove views + maps a package module was written to by earlier versions of Pyrite:
+ * `__init__.java`, `Inventory.java` and `InventoryPackage.java`.
+ */
+function removeLegacyInitViews(root: string, relativePython: string, outputFolder: string): void {
+  const outRoot = path.join(root, outputFolder);
+  const dir = relativePython.slice(0, relativePython.lastIndexOf('/') + 1);
+  const current = javaPathFor(relativePython);
+  const cls = moduleClassName(relativePython);
+  const legacy = [relativePython.replace(/\.py$/, '.java'), `${dir}${cls}.java`, `${dir}${cls}Package.java`];
+  for (const javaRel of legacy) {
+    if (javaRel === current) continue;
+    for (const rel of [javaRel, `${MAP_DIR}/${javaRel}.json`]) {
+      const abs = path.join(outRoot, rel);
+      if (fs.existsSync(abs)) fs.rmSync(abs);
+    }
+  }
 }
 
 export async function mirrorProject(translator: Translator, options: MirrorOptions): Promise<MirrorSummary> {
@@ -185,22 +250,27 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
   const files = listPythonFiles(options.root, exclude);
   const warnings: string[] = [];
   let count = 0;
-  for (const rel of files) {
+  let skipped = 0;
+  for (const [index, rel] of files.entries()) {
     if (options.isCancelled?.()) break;
-    options.onProgress?.(rel, count, files.length);
+    options.onProgress?.(rel, index, files.length);
     try {
-      const { result } = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
-      warnings.push(...result.warnings);
+      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
+      if (outcome.skipped) {
+        skipped += 1;
+        continue;
+      }
+      warnings.push(...outcome.result.warnings);
+      count += 1;
     } catch (err) {
       warnings.push(`${rel}: failed to translate: ${err instanceof Error ? err.message : String(err)}`);
     }
-    count += 1;
   }
   const outputRoot = path.join(options.root, outputFolder);
   fs.mkdirSync(outputRoot, { recursive: true });
   fs.writeFileSync(path.join(outputRoot, 'README.md'), readmeText(outputFolder, translator.name), 'utf8');
   fs.writeFileSync(path.join(outputRoot, '.gitignore'), '# Generated by Pyrite - do not commit.\n*\n', 'utf8');
-  return { files: count, warnings, outputRoot, engine: translator.name };
+  return { files: count, skipped, warnings, outputRoot, engine: translator.name };
 }
 
 /** Read the source map for a Java view file. Returns null when the file is not a generated view. */
@@ -251,6 +321,12 @@ so that Java developers can read and review them. It was generated by the
   Edit the \`.py\` file instead (use *Pyrite: Go to Python Source*, Ctrl+Alt+J).
 - The code is a *reading aid*: it keeps Python names and structure and is not meant to compile.
 - Constructs without a Java equivalent are kept and annotated with \`/* ... */\` comments.
+- An \`__init__.py\` that only marks a package (docstring, comments, \`__all__\`) gets no Java file:
+  Java packages are plain folders. One with real content (constants, re-exports, setup code) is mirrored
+  as a class named after its folder, e.g. \`inventory/__init__.py\` -> \`public final class Inventory\`;
+  its Javadoc names the original file. The file itself is named in lowerCamelCase with an \`Init\`
+  suffix (\`inventory/inventoryInit.java\`), hinting at \`__init__.py\` and keeping it from colliding
+  with a sibling \`inventory.py\` on Windows/macOS, where file names are case-insensitive.
 - \`${outputFolder}/.pyrite/maps/\` holds line maps used for navigation between the two views.
 `;
 }

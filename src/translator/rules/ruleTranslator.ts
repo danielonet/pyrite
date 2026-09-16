@@ -20,7 +20,7 @@ import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { boxed, splitTopLevel, translateType } from './typeHints';
 import { indexAtDepth0, mapExceptionName, translateExpression, translateMaskedExpression } from './expressions';
-import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, packageFromPath, toPascalCase } from '../types';
+import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, isInitModule, moduleClassName, packageFromPath, toPascalCase } from '../types';
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
@@ -169,8 +169,7 @@ class RuleTranslation {
   constructor(private readonly input: TranslateInput) {
     this.lines = splitLogicalLines(input.source);
     this.packageParts = packageFromPath(input.relativePath).split('.').filter(Boolean);
-    const base = input.relativePath.split('/').pop() ?? 'Module';
-    this.moduleClass = base === '__init__.py' ? toPascalCase(input.relativePath.split('/').slice(-2, -1)[0] ?? 'Package') + 'Package' : toPascalCase(base);
+    this.moduleClass = moduleClassName(input.relativePath);
     const requestedMode = input.javadocMode ?? 'docstringOnly';
     // Test code never gets Javadoc unless the user opted it into the same rules as production code.
     this.javadocMode = isTestFile(input.relativePath) && !input.documentTestCode ? 'none' : requestedMode;
@@ -308,8 +307,9 @@ class RuleTranslation {
    * Javadoc lines for a class: the docstring if there is one, otherwise a description
    * extrapolated from the class name.
    */
-  private classJavadoc(name: string, docLine: LogicalLine | undefined, py: number): OutLine[] {
+  private classJavadoc(name: string, docLine: LogicalLine | undefined, py: number, trailer: string[] = []): OutLine[] {
     const description = docLine ? this.docstringBody(docLine) : [describeClassSummary(name)];
+    if (trailer.length) description.push('', ...trailer);
     const at = docLine ? docLine.startLine : py;
     return renderJavadoc(description).map((text) => ({ text, py: at }));
   }
@@ -370,7 +370,13 @@ class RuleTranslation {
     let first = this.lines.findIndex((l) => l.kind === 'code');
     const hasModuleDoc = first >= 0 && isSingleLiteral(maskStrings(this.lines[first].text).text);
     if (hasModuleDoc && this.javadocMode !== 'none') this.skipIndex = first;
-    this.moduleDoc = this.wantsJavadoc(hasModuleDoc) ? this.classJavadoc(this.moduleClass, hasModuleDoc ? this.lines[first] : undefined, 0) : [];
+    // A package module is renamed after its folder (inventory/__init__.py -> Inventory), so say where it came from.
+    const initOrigin = isInitModule(this.input.relativePath)
+      ? { javadoc: `Translated from {@code ${this.input.relativePath}}, the {@code ${this.packageParts[this.packageParts.length - 1] ?? this.moduleClass}} package's __init__ module.`, comment: `// Translated from ${this.input.relativePath}, the package's __init__ module.` }
+      : undefined;
+    this.moduleDoc = this.wantsJavadoc(hasModuleDoc)
+      ? this.classJavadoc(this.moduleClass, hasModuleDoc ? this.lines[first] : undefined, 0, initOrigin ? [initOrigin.javadoc] : [])
+      : initOrigin ? [{ text: initOrigin.comment, py: 0 }] : [];
 
     for (let i = 0; i < this.lines.length; i += 1) {
       if (i === this.skipIndex) continue;

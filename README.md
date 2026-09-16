@@ -69,6 +69,8 @@ deterministic; its design is preserved there rather than deleted.
 | `Optional[T]`, `list[int]`, `dict[str, Any]` | `T /* nullable */`, `List<Integer>`, `Map<String, Object>` |
 | `ValueError`, `KeyError`, ... | `IllegalArgumentException`, `NoSuchElementException`, ... |
 | docstrings / `# comments` | Javadoc / `// comments` |
+| `inventory/__init__.py` with only a docstring / `__all__` | nothing: Java packages are plain folders |
+| `inventory/__init__.py` with real content (constants, re-exports) | `public final class Inventory`, Javadoc names the original `__init__.py`; written to `inventory/inventoryInit.java`, the `Init` suffix hinting at `__init__.py` and keeping the file distinct from a sibling `inventory.py` on case-insensitive filesystems |
 
 Anything without a clean equivalent is kept and annotated with a `/* ... */`
 comment rather than dropped, so the view is always complete.

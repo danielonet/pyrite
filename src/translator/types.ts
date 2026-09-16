@@ -101,6 +101,41 @@ export function toCamelCase(name: string): string {
   return leading + camel;
 }
 
+/** True when the relative path names a Python package module (`__init__.py`). */
+export function isInitModule(relativePath: string): boolean {
+  return relativePath.split('/').pop() === '__init__.py';
+}
+
+/**
+ * Name of the Java class a module becomes: `order_service.py` -> `OrderService`;
+ * a package module `inventory/__init__.py` is named after its folder, `Inventory`
+ * (a root-level `__init__.py` with no folder becomes `Init`).
+ */
+export function moduleClassName(relativePath: string): string {
+  const parts = relativePath.split('/');
+  const base = parts.pop() ?? 'Module';
+  if (base === '__init__.py') return toPascalCase(parts.pop() || '__init__');
+  return toPascalCase(base);
+}
+
+/**
+ * Suffix added to the *file* name of a package module's Java view (never to the class name).
+ * `inventory/__init__.py` becomes `class Inventory` written to `inventory/inventoryInit.java`:
+ * the suffix hints that the file came from `__init__.py`, and keeps it from colliding with a
+ * sibling `inventory.py` -> `inventory.java` on a case-insensitive filesystem (Windows, macOS).
+ */
+export const PACKAGE_MODULE_FILE_SUFFIX = 'Init';
+
+/** Base name (no extension) of the Java view file a module is written to. */
+export function javaFileBaseName(relativePath: string): string {
+  if (isInitModule(relativePath)) {
+    // lowerCamelCase: order_items/__init__.py -> orderItemsInit
+    const pascal = moduleClassName(relativePath);
+    return pascal.charAt(0).toLowerCase() + pascal.slice(1) + PACKAGE_MODULE_FILE_SUFFIX;
+  }
+  return (relativePath.split('/').pop() ?? 'module').replace(/\.py$/, '');
+}
+
 /** Derive a Java package name from a relative file path. */
 export function packageFromPath(relativePath: string): string {
   const parts = relativePath.split('/').slice(0, -1).filter((p) => p && p !== '.');
