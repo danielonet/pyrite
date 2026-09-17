@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Unit tests, the sample-project snapshot, and the corpus run over the first 300
+      # files of the runner's Python standard library.
+      - run: npm test
+
+  corpus-full:
+    # The whole standard library, on pushes to main only (a few minutes).
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: npm run compile
+      - name: Full corpus
+        run: |
+          export PYRITE_CORPUS="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
+          PYRITE_CORPUS_ALL=1 node --test out/test/corpus.test.js

@@ -2,7 +2,7 @@
   "name": "pyrite",
   "displayName": "Pyrite",
   "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "danielonnet",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -189,5 +189,9 @@
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "tree-sitter-python": "^0.25.0",
+    "web-tree-sitter": "^0.25.0"
   }
 }

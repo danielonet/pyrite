@@ -17,6 +17,9 @@
  */
 export type JavadocMode = 'always' | 'docstringOnly' | 'none';
 
+import type { KnownMembers } from './rules/members';
+export type { KnownMembers } from './rules/members';
+
 export interface TranslateInput {
   /** Full Python source text. */
   source: string;
@@ -40,6 +43,12 @@ export interface TranslateInput {
    * to false. Methods that don't match these simple shapes are left as ordinary Java.
    */
   lombokStyle?: boolean;
+  /**
+   * What the rest of the project declares (properties, attribute names, return and field
+   * types), so cross-file reads of a property render as accessor calls and calls into
+   * other modules get a type. Built by `mirrorProject`; this file's own declarations win.
+   */
+  knownMembers?: KnownMembers;
 }
 
 export type SymbolKind = 'class' | 'method' | 'field';

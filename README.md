@@ -64,6 +64,10 @@ deterministic; its design is preserved there rather than deleted.
 | `try/except X as e/finally`, `raise X(...)` | `try/catch (X e)/finally`, `throw new X(...)` |
 | `with open(p) as f:` | `try (var f = open(p)) {` |
 | `[f(x) for x in xs if c]` | `xs.stream().filter(x -> c).map(x -> f(x)).toList()` |
+| `sum`, `sorted(key=..)`, `any`/`all`, `next`, `round(x, 2)`, `map`/`filter`, `isinstance(x, (A, B))`, `open(p, "w")`, ... | `.mapToDouble(..).sum()`, `.sorted(Comparator.comparing(..))`, `.anyMatch(..)`, `it.next()`, `Math.round(x * 100.0) / 100.0`, `.map(..)`/`.filter(..)`, `x instanceof A \|\| ..`, `new PrintWriter(p)`, ... |
+| `value = a or default` | `Objects.requireNonNullElse(a, default)` (in a condition `a or b` stays `a \|\| b`) |
+| `@property def total(self)` and `order.total` | `total()` and `order.total()`; a trivial getter/setter pair in Lombok style becomes `@Getter`/`@Setter` on a field named after the property, read as `order.getTotal()` |
+| `x = repo.order(1)` where `order` has a `-> Order` hint, `for line in self.lines` with `lines: List[OrderLine]` | `Order x = ...`, `for (OrderLine line : this.lines)` - types follow hints on functions, methods (also from other files and base classes), fields and parameters |
 | `f"Hi {name}, {total:.2f}"` | `"Hi " + name + ", " + String.format("%.2f", total)` |
 | `x if c else y`, `and/or/not`, `None/True/False` | `c ? x : y`, `&&/\|\|/!`, `null/true/false` |
 | `Optional[T]`, `list[int]`, `dict[str, Any]` | `T /* nullable */`, `List<Integer>`, `Map<String, Object>` |
@@ -74,6 +78,21 @@ deterministic; its design is preserved there rather than deleted.
 
 Anything without a clean equivalent is kept and annotated with a `/* ... */`
 comment rather than dropped, so the view is always complete.
+
+A file with a Python syntax error is still translated, but its view starts with a
+`// WARNING` block naming the error, and a file the engine cannot handle at all gets a
+`TRANSLATION FAILED` placeholder rather than an outdated view. Syntax is checked with a
+real Python parser ([tree-sitter](architecture/tree-sitter.md), WebAssembly, offline).
+
+## Testing
+
+`npm test` runs the unit tests, a snapshot of the sample project
+(`src/test/snapshots/`, refresh with `UPDATE_SNAPSHOTS=1 npm test` after an intended
+change) and a corpus run over the first 300 files of the local Python standard
+library: the engine must not throw, must emit balanced braces, must stay fast, and
+every class and function the real parser sees must come out as a symbol. Point it
+elsewhere with `PYRITE_CORPUS=dir1:dir2`, widen it with `PYRITE_CORPUS_ALL=1`. CI runs
+the full standard library on every push to `main`.
 
 ## Getting started (development)
 

@@ -18,6 +18,12 @@ export interface LogicalLine {
   startLine: number;
   /** 1-based last physical line. */
   endLine: number;
+  /**
+   * `# comments` found on the physical lines of a multi-line statement (outside strings),
+   * in order. They are lifted out of `text` so a comment inside a bracketed literal cannot
+   * be mistaken for the end of the statement.
+   */
+  comments?: string[];
 }
 
 function indentOf(line: string): number {
@@ -111,21 +117,56 @@ export function splitLogicalLines(source: string): LogicalLine[] {
       current = physical[i];
     }
 
-    const text = joinParts(parts);
-    result.push({ kind: 'code', text, indent: indentOf(first), startLine: start + 1, endLine: i + 1 });
+    const joined = joinParts(parts);
+    const line: LogicalLine = { kind: 'code', text: joined.text, indent: indentOf(first), startLine: start + 1, endLine: i + 1 };
+    if (joined.comments.length) line.comments = joined.comments;
+    result.push(line);
     i += 1;
   }
   return result;
 }
 
+/** Split one physical line into code and its trailing `# comment`, given the string state it starts in. */
+function splitOffComment(text: string, state: ScanState): { code: string; comment?: string } {
+  let str = state.str;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (str) {
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (text.startsWith(str, i)) {
+        i += str.length;
+        str = null;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === '#') return { code: text.slice(0, i), comment: text.slice(i + 1).trim() };
+    if (ch === '"' || ch === "'") {
+      const triple = ch.repeat(3);
+      str = text.startsWith(triple, i) ? triple : ch;
+      i += str.length;
+      continue;
+    }
+    i += 1;
+  }
+  return { code: text };
+}
+
 /**
  * Join physical lines of one logical line. Inside triple-quoted strings we keep the
  * real newlines (they matter for text blocks); elsewhere we collapse to one space
- * and drop backslash continuations.
+ * and drop backslash continuations. Comments on the joined lines are lifted out
+ * (a single-line statement keeps its trailing comment in `text`).
  */
-function joinParts(parts: string[]): string {
-  if (parts.length === 1) return parts[0].trim();
+function joinParts(parts: string[]): { text: string; comments: string[] } {
+  if (parts.length === 1) return { text: parts[0].trim(), comments: [] };
   let out = '';
+  const comments: string[] = [];
   let state: ScanState = { depth: 0, str: null };
   for (let idx = 0; idx < parts.length; idx += 1) {
     const raw = idx === 0 ? parts[idx].trim() : parts[idx];
@@ -134,9 +175,16 @@ function joinParts(parts: string[]): string {
       out += inTriple ? '\n' : ' ';
     }
     let piece = inTriple ? raw : raw.trim();
-    if (!inTriple) piece = piece.replace(/\\\s*$/, '');
+    if (!inTriple) {
+      const split = splitOffComment(piece, state);
+      if (split.comment !== undefined) {
+        if (split.comment) comments.push(split.comment);
+        piece = split.code.replace(/\s+$/, '');
+      }
+      piece = piece.replace(/\\\s*$/, '');
+    }
     out += piece;
     state = scan(raw, state);
   }
-  return out.replace(/[ \t]+$/g, '');
+  return { text: out.replace(/[ \t]+$/g, ''), comments };
 }

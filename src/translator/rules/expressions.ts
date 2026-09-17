@@ -7,10 +7,19 @@
 
 import { PLACEHOLDER_RE, SIMPLE_OPERAND, maskStrings, setFStringExpressionHook, unmaskStrings } from './strings';
 import { splitTopLevel } from './typeHints';
+import { rewriteBuiltinCalls, rewriteOrFallback, streamOf } from './builtins';
 
 export interface ExprContext {
   /** Enclosing class name, used to render `cls`. */
   className?: string;
+  /** The literals behind the placeholders in the masked text, when the caller has them. */
+  literals?: string[];
+  /** The expression is used as a value (assignment, return), not as a condition: `a or b` is a fallback. */
+  valueContext?: boolean;
+  /** How a read of a Python `@property` is rendered (`total()`, `getTotal()`), or undefined for a plain attribute. */
+  propertyAccessor?: (name: string) => string | undefined;
+  /** `this.<python field>` -> `this.<java field>` for backing fields renamed after their property. */
+  fieldRenames?: Map<string, string>;
 }
 
 const S = SIMPLE_OPERAND;
@@ -67,9 +76,12 @@ const B = '(?:[^{}]|\\{[^{}]*\\})+?';
 
 /** Rewrites list/set/dict comprehensions and generator expressions into stream pipelines. */
 function rewriteComprehensions(text: string): string {
+  // Every comprehension has ` for `; without it the nested-bracket regexes below would still
+  // crawl a large literal (a 30 KB dict table) for seconds.
+  if (!/\sfor\s/.test(text)) return text;
   const build = (expr: string, vars: string, iter: string, cond: string | undefined, terminal: string) => {
     const p = lambdaParams(vars);
-    let out = `${iter.trim()}.stream()`;
+    let out = streamOf(iter.trim());
     if (cond) out += `.filter(${p} -> ${cond.trim()})`;
     if (expr.trim() !== vars.trim()) out += `.map(${p} -> ${expr.trim()})`;
     return out + terminal;
@@ -85,7 +97,7 @@ function rewriteComprehensions(text: string): string {
       new RegExp(`\\{(${B}):\\s*(${B})\\s+for\\s+([\\w, ()]+?)\\s+in\\s+(${B})(?:\\s+if\\s+(${B}))?\\}`),
       (_m, k: string, v: string, vars: string, iter: string, cond?: string) => {
         const p = lambdaParams(vars);
-        let out = `${iter.trim()}.stream()`;
+        let out = streamOf(iter.trim());
         if (cond) out += `.filter(${p} -> ${cond.trim()})`;
         return `${out}.collect(Collectors.toMap(${p} -> ${k.trim()}, ${p} -> ${v.trim()}))`;
       },
@@ -274,28 +286,16 @@ const KEYWORD_RULES: Array<[RegExp, string]> = [
 
 const BUILTIN_RULES: Array<[RegExp, string]> = [
   [/\bprint\(/g, 'System.out.println('],
-  [new RegExp(`\\blen\\((${S})\\)`, 'g'), '$1.size()'],
   [/\bstr\(/g, 'String.valueOf('],
   [new RegExp(`\\bint\\((?=${PLACEHOLDER_RE})`, 'g'), 'Integer.parseInt('],
   [new RegExp(`\\bfloat\\((?=${PLACEHOLDER_RE})`, 'g'), 'Double.parseDouble('],
   [/\bint\(/g, '(int) ('],
   [/\bfloat\(/g, '(double) ('],
   [/\bbool\(/g, 'Boolean.valueOf('],
-  [new RegExp(`\\bisinstance\\((${S}),\\s*([\\w.]+)\\)`, 'g'), '$1 instanceof $2'],
-  [/\bdict\(\)/g, 'new HashMap<>()'],
-  [/\blist\(\)/g, 'new ArrayList<>()'],
-  [/\bset\(\)/g, 'new HashSet<>()'],
-  [/\bdict\(/g, 'new HashMap<>('],
-  [/\blist\(/g, 'new ArrayList<>('],
-  [/\bset\(/g, 'new HashSet<>('],
-  [/\btuple\(/g, 'Tuple.of('],
   [/\bsuper\(\)\.__init__\(/g, 'super('],
   [/\bsuper\(\)\./g, 'super.'],
   [/\bsuper\(\w+,\s*this\)\./g, 'super.'],
-  [/\bmin\(/g, 'Math.min('],
-  [/\bmax\(/g, 'Math.max('],
   [/\babs\(/g, 'Math.abs('],
-  [new RegExp(`\\bround\\((${S})\\)`, 'g'), 'Math.round($1)'],
   [new RegExp(`(${PLACEHOLDER_RE})\\s*\\*\\s*(${S})`, 'g'), '$1.repeat($2)'],
   [/\btype\((\w+)\)/g, '$1.getClass()'],
   [/\.__class__\.__name__/g, '.getClass().getSimpleName()'],
@@ -361,8 +361,16 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   t = rewriteTernary(t);
   t = rewriteBrackets(t);
   t = rewriteBraces(t);
+  if (ctx.valueContext) t = rewriteOrFallback(t);
   for (const [re, rep] of KEYWORD_RULES) t = t.replace(re, rep);
   if (ctx.className) t = t.replace(/\bcls\b/g, ctx.className);
+  const literals = ctx.literals;
+  t = rewriteBuiltinCalls(t, {
+    literal: (token) => {
+      const idx = new RegExp(`^${PLACEHOLDER_RE}$`).test(token) ? Number(token.slice(1, -1)) : -1;
+      return idx >= 0 ? literals?.[idx] : undefined;
+    },
+  });
   for (const [re, rep] of BUILTIN_RULES) t = t.replace(re, rep);
   t = rewriteOperators(t);
   t = rewriteExceptionNames(t);
@@ -370,19 +378,40 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   t = t.replace(/([(,]\s*)([A-Za-z_]\w*)\s*=(?!=)\s*/g, '$1/* $2 = */ ');
   // constructor calls: Foo(...) / pkg.Foo(...) -> new Foo(...)
   t = t.replace(/(^|[^\w.@])((?:[a-z_]\w*\.)*[A-Z]\w*)\(/g, (m, pre: string, name: string, offset: number, whole: string) => {
-    if (/(^|\s)new\s$/.test(whole.slice(0, offset + pre.length))) return m;
-    if (/^(List|Map|Set|Math|String|Integer|Double|Boolean|Collectors|Tuple|Optional|Objects|Arrays|Collections|Character|CompletableFuture)$/.test(name)) return m;
+    if (/(^|[\s(])new\s$/.test(whole.slice(0, offset + pre.length))) return m;
+    if (/^(List|Map|Set|Math|String|Integer|Double|Boolean|Collectors|Tuple|Optional|Objects|Arrays|Collections|Character|CompletableFuture|IntStream|Comparator|BigDecimal|Number)$/.test(name)) return m;
     return `${pre}new ${name}(`;
   });
+  // Python property reads look like field reads; render them as the accessor call they are.
+  if (ctx.propertyAccessor) {
+    t = t.replace(/\.([A-Za-z_]\w*)(?![\w(])/g, (m, name: string, offset: number, whole: string) => {
+      const before = whole[offset - 1];
+      if (before === undefined || /[\d.\s]/.test(before)) return m; // 1.5, "..", or a stray dot
+      const acc = ctx.propertyAccessor!(name);
+      return acc ? `.${acc}` : m;
+    });
+  }
+  if (ctx.fieldRenames?.size) {
+    t = t.replace(/\bthis\.(\w+)\b(?!\()/g, (m, field: string) => {
+      const renamed = ctx.fieldRenames!.get(field);
+      return renamed ? `this.${renamed}` : m;
+    });
+  }
   return t;
 }
 
 /** Translate a raw (unmasked) Python expression. */
 export function translateExpression(expr: string, ctx: ExprContext = {}): string {
   const masked = maskStrings(expr);
-  const out = translateMaskedExpression(masked.text, ctx);
+  const out = translateMaskedExpression(masked.text, { ...ctx, literals: masked.literals });
   return unmaskStrings(out, masked.literals);
 }
 
-// f-string fields ({name}, {total:.2f}) are expressions too.
-setFStringExpressionHook((e) => translateExpression(e));
+// f-string fields ({name}, {total:.2f}) are expressions too. Literals are rendered while the
+// statement is being masked, before any translate call, so the statement translator hands the
+// context (class name, property accessors, field renames) over up front.
+let fStringContext: ExprContext = {};
+export function setFStringExpressionContext(ctx: ExprContext): void {
+  fStringContext = ctx;
+}
+setFStringExpressionHook((e) => translateExpression(e, fStringContext));

@@ -60,7 +60,7 @@ test('expressions: keywords, builtins and literals', () => {
 test('expressions: comprehensions become streams', () => {
   assert.equal(translateExpression('[p.name for p in products if p.active]'), 'products.stream().filter(p -> p.active).map(p -> p.name).toList()');
   assert.equal(translateExpression('{o.id: o for o in orders}'), 'orders.stream().collect(Collectors.toMap(o -> o.id, o -> o))');
-  assert.equal(translateExpression('sum(x * 2 for x in xs)'), 'sum(xs.stream().map(x -> x * 2))');
+  assert.equal(translateExpression('sum(x * 2 for x in xs)'), 'xs.stream().map(x -> x * 2).mapToDouble(Number::doubleValue).sum()');
   assert.equal(translateExpression('"".join(c.lower() if c.isalnum() else "-" for c in text)'), 'String.join("", text.stream().map(c -> c.isalnum() ? c.toLowerCase() : "-"))');
 });
 
@@ -220,7 +220,7 @@ def f(items, d):
   contains(out, '} catch (Exception ignored) {');
   contains(out, 'throw ignored; // re-raise');
   contains(out, '} finally {');
-  contains(out, 'try (var fh = open(p)) { // with');
+  contains(out, 'try (var fh = new BufferedReader(new FileReader(p))) { // with');
   contains(out, 'var data = fh.read();');
   contains(out, 'while (!done /* falsy: null or empty */) {');
   contains(out, 'done = step();'); // second assignment: no re-declaration
@@ -449,8 +449,10 @@ test('lombok: a trivial @property/@x.setter pair over a field becomes @Getter/@S
         self._balance = value
 `;
   const out = translateWithRules({ source: src, relativePath: 'pkg/mod.py', lombokStyle: true }).java;
-  contains(out, '@Getter\n        private Object _owner;');
-  contains(out, '@Getter @Setter\n        private Object _balance;');
+  // The backing field is named after the property so Lombok generates getOwner()/setBalance(), not get_owner().
+  contains(out, '@Getter\n        private Object owner; // assigned as self._owner in __init__()');
+  contains(out, '@Getter @Setter\n        private Object balance; // assigned as self._balance in __init__()');
+  contains(out, 'this.owner = owner;');
   assert.ok(!out.includes('owner()'), `getter method should be collapsed away:\n${out}`);
   assert.ok(!out.includes('balance()'), `getter/setter methods should be collapsed away:\n${out}`);
 });
@@ -708,4 +710,369 @@ test('removeMirroredFolder deletes the mirrored subtree and its maps, and nothin
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('builtins: calls are rewritten with balanced arguments, nested and keyword-aware', () => {
+  const e = (s: string) => translateExpression(s);
+  assert.equal(e('len(a + b)'), '(a + b).size()');
+  assert.equal(e('len(self.repo.orders())'), 'this.repo.orders().size()');
+  assert.equal(e('sum(paid)'), 'paid.stream().mapToDouble(Number::doubleValue).sum()');
+  assert.equal(e('sum(i for i in range(3))'), 'IntStream.range(0, 3).boxed().mapToDouble(Number::doubleValue).sum()');
+  assert.equal(e('sorted(xs)'), 'xs.stream().sorted().toList()');
+  assert.equal(e('sorted(xs, key=lambda o: o.x, reverse=True)'), 'xs.stream().sorted(Comparator.comparing(o -> o.x).reversed()).toList()');
+  assert.equal(e('any(x > 1 for x in xs)'), 'xs.stream().anyMatch(x -> x > 1)');
+  assert.equal(e('all(xs)'), 'xs.stream().allMatch(Boolean.TRUE::equals)');
+  assert.equal(e('next(it)'), 'it.next()');
+  assert.equal(e('next(it, None)'), 'it.hasNext() ? it.next() : null');
+  assert.equal(e('iter(xs)'), 'xs.iterator()');
+  assert.equal(e('round(x)'), 'Math.round(x)');
+  assert.equal(e('round(x * y, 2)'), 'Math.round((x * y) * 100.0) / 100.0');
+  assert.equal(e('list(map(str, r))'), 'r.stream().map(String::valueOf).toList()');
+  assert.equal(e('filter(None, xs)'), 'xs.stream().filter(Objects::nonNull)');
+  assert.equal(e('zip(a, b)'), 'Tuple.zip(a, b)');
+  assert.equal(e('range(1, n)'), 'IntStream.range(1, n)');
+  assert.equal(e('isinstance(x, (A, B))'), '(x instanceof A || x instanceof B)');
+  assert.equal(e('isinstance(x, A)'), 'x instanceof A');
+  assert.equal(e('getattr(o, "name")'), 'o.name /* getattr */');
+  assert.equal(e('getattr(o, "name", 1)'), 'Objects.requireNonNullElse(o.name, 1)');
+  assert.equal(e('getattr(o, attr)'), 'getattr(o, attr) /* reflective attribute access */');
+  assert.equal(e('hasattr(o, "x")'), 'o.x != null /* hasattr */');
+  assert.equal(e('open(p)'), 'new BufferedReader(new FileReader(p))');
+  assert.equal(e('open(p, "w")'), 'new PrintWriter(p)');
+  assert.equal(e('open(p, "rb")'), 'new FileInputStream(p)');
+  assert.equal(e('min(xs)'), 'Collections.min(xs)');
+  assert.equal(e('min(a, b, c)'), 'Math.min(a, Math.min(b, c))');
+  assert.equal(e('max(xs, key=len)'), 'Collections.max(xs, Comparator.comparing(v -> v.size()))');
+  assert.equal(e('list()'), 'new ArrayList<>()');
+  assert.equal(e('list(xs)'), 'new ArrayList<>(xs)');
+  assert.equal(e('set(x for x in xs)'), 'xs.stream().collect(Collectors.toSet())');
+  assert.equal(e('dict()'), 'new HashMap<>()');
+  // A method of the same name is not a builtin.
+  assert.equal(e('obj.sum(xs)'), 'obj.sum(xs)');
+});
+
+test('builtins: `a or b` is a fallback in value position and a boolean in a condition', () => {
+  const out = java(`
+def f(note, buffer):
+    label = note or "n/a"
+    stream = buffer or io.StringIO()
+    if note or buffer:
+        return note or buffer
+    return note is None or buffer
+`);
+  contains(out, 'var label = Objects.requireNonNullElse(note, "n/a");');
+  contains(out, 'var stream = Objects.requireNonNullElse(buffer, new io.StringIO());');
+  contains(out, 'if (note || buffer) {');
+  contains(out, 'return Objects.requireNonNullElse(note, buffer);');
+  contains(out, 'return note == null || buffer;');
+});
+
+test('builtins: file APIs pull in java.io', () => {
+  const out = java(`
+def read(p):
+    with open(p) as fh:
+        return fh.read()
+`);
+  contains(out, 'import java.io.*;');
+  contains(out, 'try (var fh = new BufferedReader(new FileReader(p))) {');
+});
+
+test('properties: reads become accessor calls and writes become setter calls, consistently with how the accessor was emitted', () => {
+  const src = `
+class Order:
+    def __init__(self, lines):
+        self.lines = lines
+        self._note = ""
+
+    @property
+    def total(self) -> float:
+        return sum(l.price for l in self.lines)
+
+    @property
+    def note(self) -> str:
+        return self._note
+
+    @note.setter
+    def note(self, value: str):
+        self._note = value
+
+    def describe(self):
+        return f"{self.total} {self.note}"
+
+class Report:
+    def __init__(self, name):
+        self.name = name
+
+def run(order: Order, report):
+    order.note = "paid"
+    order.note += "!"
+    print(order.total, report.name)
+`;
+  const plain = java(src);
+  contains(plain, '@Property // Python property: read as obj.total, rendered as obj.total()');
+  contains(plain, 'return this.total() + " " + this.note();');
+  contains(plain, 'order.note("paid");');
+  contains(plain, 'order.note(order.note() + "!");');
+  contains(plain, 'System.out.println(order.total(), report.name);'); // `name` is a plain attribute: untouched
+
+  const styled = lombok(src);
+  // `total` is not trivial: still a method. `note` is trivial: field renamed, Lombok accessor names.
+  contains(styled, 'public double total() {');
+  contains(styled, '@Getter @Setter\n        private String note; // assigned as self._note in __init__()');
+  contains(styled, 'return this.total() + " " + this.getNote();');
+  contains(styled, 'order.setNote("paid");');
+  contains(styled, 'order.setNote(order.getNote() + "!");');
+  assert.ok(!styled.includes('this._note'), styled);
+});
+
+test('properties: a boolean trivial property gets an is-accessor in Lombok style', () => {
+  const out = lombok(`
+class Flag:
+    def __init__(self, active: bool):
+        self._active = active
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+def check(flag):
+    return flag.active
+`);
+  contains(out, '@Getter\n        private boolean active;');
+  contains(out, 'return flag.isActive();');
+});
+
+test('types: locals, fields and loop variables take their type from hints and calls', () => {
+  const out = java(`
+from typing import Dict, List
+
+def load(path: str) -> Order:
+    return Order()
+
+class Repo:
+    def order(self, order_id: int) -> "Order":
+        return self._orders[order_id]
+
+class Service:
+    lines: List[OrderLine] = []
+    prices: Dict[str, float] = {}
+
+    def __init__(self, repo: Repo):
+        self.repo = repo
+        self.first = self.repo.order(1)
+        self.loaded = load("x")
+
+    def _require(self, order_id: int) -> Order:
+        return self.repo.order(order_id)
+
+    def run(self, orders: List[Order]):
+        current = self._require(1)
+        other = self.repo.order(2)
+        fresh = load("y")
+        for line in self.lines:
+            print(line)
+        for sku, price in self.prices.items():
+            print(sku, price)
+        for i, line in enumerate(self.lines):
+            print(i, line)
+        for o in orders:
+            print(o)
+        for k in self.prices:
+            print(k)
+`);
+  contains(out, 'public Order first; // assigned as self.first in __init__()');
+  contains(out, 'public Order loaded; // assigned as self.loaded in __init__()');
+  contains(out, 'Order current = this._require(1);');
+  contains(out, 'Order other = this.repo.order(2);');
+  contains(out, 'Order fresh = load("y");');
+  contains(out, 'for (OrderLine line : this.lines) {');
+  contains(out, 'String sku = entry.getKey();');
+  contains(out, 'double price = entry.getValue();');
+  contains(out, 'OrderLine line = this.lines.get(i);');
+  contains(out, 'for (Order o : orders) {');
+  contains(out, 'for (String k : this.prices.keySet()) {');
+});
+
+test('types: return hints are inherited from a base class in the same file', () => {
+  const out = java(`
+class Base:
+    def make(self) -> Widget:
+        return Widget()
+
+class Child(Base):
+    def use(self):
+        w = self.make()
+        return w
+`);
+  contains(out, 'Widget w = this.make();');
+});
+
+test('cross-file knowledge: properties and return types from other modules flow through knownMembers', () => {
+  const known = {
+    properties: { total: { trivial: false, boolean: false, setter: false } },
+    attributes: [],
+    returnTypes: { 'Repo.order': 'Order /* nullable */', 'load': 'Config' },
+    fieldTypes: { 'Repo.count': 'int' },
+  };
+  const out = translateWithRules({
+    source: `
+class Service:
+    def __init__(self, repo: Repo):
+        self.repo = repo
+
+    def run(self):
+        order = self.repo.order(1)
+        cfg = load()
+        n = self.repo.count
+        return order.total
+`,
+    relativePath: 'pkg/mod.py',
+    knownMembers: known,
+  }).java;
+  contains(out, 'Order /* nullable */ order = this.repo.order(1);');
+  contains(out, 'Config cfg = load();');
+  contains(out, 'int n = this.repo.count;');
+  contains(out, 'return order.total();');
+});
+
+test('cross-file knowledge: the project mirror scans every file first and leaves members.json for single-file runs', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-members-'));
+  try {
+    fs.mkdirSync(path.join(root, 'app'));
+    fs.writeFileSync(path.join(root, 'app', 'repo.py'), 'class Repo:\n    def order(self, i: int) -> "Order":\n        return None\n\n    @property\n    def size(self) -> int:\n        return 0\n', 'utf8');
+    fs.writeFileSync(path.join(root, 'app', 'service.py'), 'class Service:\n    def __init__(self, repo: Repo):\n        self.repo = repo\n\n    def run(self):\n        o = self.repo.order(1)\n        return self.repo.size\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    const { mirrorProject } = await import('../mirror');
+    await mirrorProject(translator, { root });
+    const view = () => fs.readFileSync(path.join(root, '.java-view', 'app', 'service.java'), 'utf8');
+    contains(view(), 'Order o = this.repo.order(1);');
+    contains(view(), 'return this.repo.size();');
+    assert.ok(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'members.json')));
+
+    // A later single-file translation (a save in the editor) still knows about the other module.
+    fs.writeFileSync(path.join(root, 'app', 'service.py'), 'class Service:\n    def __init__(self, repo: Repo):\n        self.repo = repo\n\n    def run(self):\n        first = self.repo.order(2)\n        return first\n', 'utf8');
+    await mirrorFile(translator, root, 'app/service.py');
+    contains(view(), 'Order first = this.repo.order(2);');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('regression: comments inside a multi-line literal do not cut the statement short', () => {
+  const out = java(`
+CODEC_MAP = {
+    "gb2312": "eucgb2312_cn",  # main
+    # Hack: no conversion for these
+    "big5": "big5_tw",
+    "hash": "#notacomment",
+}
+FLAGS = [  # leading
+    1,
+    2,  # two
+]
+`);
+  contains(out, '// main\n    // Hack: no conversion for these\n    public static final Map<String, Object> CODEC_MAP = Map.of("gb2312", "eucgb2312_cn", "big5", "big5_tw", "hash", "#notacomment");');
+  contains(out, '// leading\n    // two\n    public static final List<Object> FLAGS = List.of(1, 2);');
+  assertBracesBalanced(out);
+});
+
+test('regression: a huge literal without a comprehension translates quickly', () => {
+  const entries = Array.from({ length: 1500 }, (_, i) => `    'key_${i}': 'value_${i}',`).join('\n');
+  const started = Date.now();
+  const out = java(`TABLE = {\n${entries}\n}\n`);
+  contains(out, 'public static final Map<String, Object> TABLE = Map.of("key_0", "value_0",');
+  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
+});
+
+test('a file with a Python syntax error is still translated but flagged at the top', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-syntax-'));
+  try {
+    fs.mkdirSync(path.join(root, 'pkg'));
+    fs.writeFileSync(path.join(root, 'pkg', 'bad.py'), 'def ok():\n    return 1\n\ndef broken(:\n    pass\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    const outcome = await mirrorFile(translator, root, 'pkg/bad.py');
+    assert.equal(outcome.skipped, false);
+    const view = fs.readFileSync(path.join(root, '.java-view', 'pkg', 'bad.java'), 'utf8');
+    contains(view, '// WARNING: pkg/bad.py has Python syntax errors');
+    contains(view, 'line 4,');
+    contains(view, 'public static Object ok() {');
+    assert.ok(outcome.result!.warnings.some((w) => /pkg\/bad\.py:4: Python syntax error/.test(w)), outcome.result!.warnings.join('\n'));
+    // Symbols still point at the right (shifted) lines.
+    const lines = view.split('\n');
+    const ok = outcome.result!.symbols.find((s) => s.name === 'ok')!;
+    assert.match(lines[ok.javaLine], /ok\(\)/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('regression: a multi-line triple-quoted f-string renders as text blocks, never a string with raw newlines', () => {
+  const out = java(['def page(title, body):', '    return f"""<html>', '<h1>{title}</h1>', '{body}', '</html>"""', ''].join('\n'));
+  contains(out, 'return """\n<html>\n<h1>""" + title + """\n</h1>\n""" + body + """\n</html>""";');
+  for (const line of out.split('\n')) {
+    // No line may hold an unterminated ordinary string literal.
+    const stripped = line.replace(/"""/g, '').replace(/"(?:[^"\\]|\\.)*"/g, '');
+    assert.ok(!stripped.includes('"'), `unterminated string on: ${line}`);
+  }
+});
+
+test('regression: source map and symbol lines stay aligned after a multi-line text block', () => {
+  const result = translateWithRules({
+    source: ['BANNER = """', 'line one', 'line two', '"""', '', 'def after():', '    return 1', ''].join('\n'),
+    relativePath: 'pkg/mod.py',
+  });
+  const lines = result.java.split('\n');
+  assert.equal(result.sourceMap.length, lines.length, 'one source-map entry per physical line');
+  const after = result.symbols.find((s) => s.name === 'after')!;
+  assert.match(lines[after.javaLine], /public static Object after\(\)/);
+  assert.equal(result.sourceMap[after.javaLine], 6);
+  assert.equal(javaLineFor({ python: '', java: '', engine: 'rules', generatedAt: '', lines: result.sourceMap, symbols: [] }, 7), lines.findIndex((l) => l.includes('return 1;')));
+});
+
+test('regression: one-line compound statements open a block and chain with the next clause', () => {
+  const out = java(`
+def classify(o, xs):
+    if o == "-n": kind = 1
+    elif o == "-t": kind = 2
+    else: kind = 0
+    try: xs.check()
+    except: pass
+    for x in xs: kind += x
+    while kind > 100: kind -= 1
+    with lock: kind += 1
+    return kind
+
+def one(): return 1
+class Empty: pass
+if __name__ == "__main__": classify("-n", [])
+`);
+  contains(out, 'if (o == "-n") {\n            int kind = 1;\n        } else if (o == "-t") {\n            kind = 2;\n        } else {\n            kind = 0;\n        }');
+  contains(out, 'try {\n            xs.check();\n        } catch (Exception e) {\n            // pass\n        }');
+  contains(out, 'for (var x : xs) {\n            kind += x;\n        }');
+  contains(out, 'while (kind > 100) {\n            kind -= 1;\n        }');
+  contains(out, 'synchronized (lock) { // with\n            kind += 1;\n        }');
+  contains(out, 'public static Object one() {\n        return 1;\n    }');
+  contains(out, 'public static class Empty {\n        // pass\n    }');
+  contains(out, 'public static void main(String[] args) {\n        classify("-n", new ArrayList<>());\n    }');
+  assertBracesBalanced(out);
+});
+
+test('PEP 695 type parameters on classes and functions become Java type parameters', () => {
+  const out = java(`
+class Box[T](Protocol):
+    def get(self) -> T:
+        ...
+
+class Pair[K, V: Comparable]:
+    def __init__(self, key: K, value: V):
+        self.key = key
+        self.value = value
+
+def first[T](items: list[T], /) -> T:
+    return items[0]
+`);
+  contains(out, 'public interface Box<T> {');
+  contains(out, 'public static class Pair<K, V extends Comparable> {');
+  contains(out, 'public static <T> T first(List<T> items) {');
+  contains(out, 'T get();');
 });

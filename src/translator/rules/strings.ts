@@ -115,7 +115,7 @@ function renderLiteral(lit: Literal): string {
     body = body.replace(/\\/g, '\\\\');
   }
   if (isF) {
-    return renderFString(body, single);
+    return renderFString(body, single, triple);
   }
   if (triple) {
     // Java text block (Java 15+). Content must start on a new line.
@@ -128,13 +128,16 @@ function renderLiteral(lit: Literal): string {
 /**
  * f"Hello {name}, total={total:.2f}" -> "Hello " + name + ", total=" + String.format("%.2f", total)
  */
-function renderFString(body: string, single: boolean): string {
+function renderFString(body: string, single: boolean, triple = false): string {
   const parts: string[] = [];
   let text = '';
   let i = 0;
   const flushText = () => {
     if (text.length > 0) {
-      parts.push(`"${escapeForJava(text, single)}"`);
+      // A multi-line piece of a triple-quoted f-string becomes a text block: a Java string
+      // literal cannot contain a raw newline.
+      const escaped = escapeForJava(text, single);
+      parts.push(triple && text.includes('\n') ? `"""\n${escaped.replace(/^\n/, '')}"""` : `"${escaped}"`);
       text = '';
     }
   };

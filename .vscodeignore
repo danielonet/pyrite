@@ -11,3 +11,13 @@ sample-python-project/**
 .java-view/**
 .gitignore
 .nvmrc
+# tree-sitter: ship only the JS loader and the two .wasm files
+node_modules/tree-sitter-python/prebuilds/**
+node_modules/tree-sitter-python/src/**
+node_modules/tree-sitter-python/bindings/**
+node_modules/tree-sitter-python/queries/**
+node_modules/tree-sitter-python/binding.gyp
+node_modules/tree-sitter-python/grammar.js
+node_modules/web-tree-sitter/debug/**
+node_modules/web-tree-sitter/src/**
+node_modules/web-tree-sitter/lib/**

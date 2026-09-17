@@ -19,8 +19,9 @@
 import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { boxed, splitTopLevel, translateType } from './typeHints';
-import { indexAtDepth0, mapExceptionName, translateExpression, translateMaskedExpression } from './expressions';
+import { ExprContext, indexAtDepth0, mapExceptionName, setFStringExpressionContext, translateExpression, translateMaskedExpression } from './expressions';
 import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, isInitModule, moduleClassName, packageFromPath, toPascalCase } from '../types';
+import { FieldInfo, KnownMembers, MemberScan, classNameOf, collectSelfFields, elementTypeOf, inferTypeFromMaskedValue, mapTypesOf, scanMembers, toKnownMembers, typeFromDefault } from './members';
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
@@ -35,6 +36,10 @@ interface Block {
   isInterface?: boolean;
   /** Variables already declared in this function scope. */
   declared?: Set<string>;
+  /** Java types of parameters and locals declared in this function scope. */
+  types?: Map<string, string>;
+  /** Python field name -> Java field name, for backing fields renamed after their property (Lombok style). */
+  fieldRenames?: Map<string, string>;
   /** Name bound by `except ... as name` for this catch block. */
   catchVar?: string;
   /** pyrite.lombokStyle plan for this class, if any boilerplate here can be collapsed. */
@@ -111,6 +116,18 @@ const DUNDER_METHODS: Record<string, { name: string; ret: string; params?: strin
   __post_init__: { name: '__post_init__ /* runs after the generated constructor */', ret: 'void', doc: 'Runs after the generated constructor.' },
 };
 
+/**
+ * PEP 695 type parameters `[T, U: Bound, *Ts, **P]` -> Java type parameters
+ * (`T`, `U extends Bound`; variadic/param-spec parameters keep their bare name).
+ */
+function typeParamsOf(bracketed: string | undefined): string[] {
+  if (!bracketed) return [];
+  return splitTopLevel(bracketed.slice(1, -1))
+    .map((p) => /^\**(\w+)\s*(?::\s*(.+))?$/.exec(p.trim()))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => (m[2] ? `${m[1]} extends ${translateType(m[2])}` : m[1]));
+}
+
 /** Remove one pair of enclosing parentheses when they wrap the whole text. */
 function stripOuterParens(text: string): string {
   const t = text.trim();
@@ -124,28 +141,6 @@ function stripOuterParens(text: string): string {
     }
   }
   return t.slice(1, -1);
-}
-
-function inferTypeFromMaskedValue(masked: string, literals: string[]): string {
-  const v = masked.trim();
-  if (/^-?\d+$/.test(v)) return 'int';
-  if (/^-?\d*\.\d+(e-?\d+)?$/i.test(v)) return 'double';
-  if (isSingleLiteral(v)) return 'String';
-  if (v === 'True' || v === 'False') return 'boolean';
-  if (v === 'None') return 'Object /* nullable */';
-  if (/^\[/.test(v) || /^list\(/.test(v)) return 'List<Object>';
-  if (/^\{/.test(v)) return indexAtDepth0(v.slice(1, -1), /:/) >= 0 || v === '{}' ? 'Map<String, Object>' : 'Set<Object>';
-  if (/^dict\(/.test(v)) return 'Map<String, Object>';
-  if (/^set\(/.test(v)) return 'Set<Object>';
-  if (/^\(/.test(v)) return 'Tuple';
-  if (/^lambda\b/.test(v)) return 'Function<?, ?>';
-  const ctor = /^([A-Z]\w*)\(/.exec(v);
-  if (ctor) return ctor[1];
-  const qualifiedCtor = /^[\w.]*\.([A-Z]\w*)\(/.exec(v);
-  if (qualifiedCtor) return qualifiedCtor[1];
-  if (/^logging\.getLogger\(/.test(v)) return 'Logger';
-  if (/^Path\(/.test(v)) return 'Path';
-  return 'var';
 }
 
 class RuleTranslation {
@@ -165,9 +160,19 @@ class RuleTranslation {
   /** Classes, methods and fields declared so far, for "Go to Definition"; rebased in assemble(). */
   private readonly symbols: RawSymbol[] = [];
   private readonly javadocMode: JavadocMode;
+  /** What this module declares (classes, properties, fields, return hints). */
+  private readonly scan: MemberScan;
+  /** The same, name-keyed, plus what the rest of the project declares. */
+  private readonly localKnown: KnownMembers;
+  private readonly known: KnownMembers | undefined;
+  private readonly knownAttributes: Set<string>;
 
   constructor(private readonly input: TranslateInput) {
     this.lines = splitLogicalLines(input.source);
+    this.scan = scanMembers(this.lines);
+    this.localKnown = toKnownMembers(this.scan);
+    this.known = input.knownMembers;
+    this.knownAttributes = new Set([...this.localKnown.attributes, ...(this.known?.attributes ?? [])]);
     this.packageParts = packageFromPath(input.relativePath).split('.').filter(Boolean);
     this.moduleClass = moduleClassName(input.relativePath);
     const requestedMode = input.javadocMode ?? 'docstringOnly';
@@ -238,8 +243,139 @@ class RuleTranslation {
     return undefined;
   }
 
-  private exprCtx() {
-    return { className: this.nearestClass()?.className };
+  private exprCtx(literals?: string[], valueContext = false): ExprContext {
+    return {
+      className: this.nearestClass()?.className,
+      literals,
+      valueContext,
+      propertyAccessor: (name) => this.propertyGetter(name),
+      fieldRenames: this.nearestClass()?.fieldRenames,
+    };
+  }
+
+  // ------------------------------------------------------ properties & types
+
+  private propertyInfo(name: string): { trivial: boolean; boolean: boolean; setter: boolean } | undefined {
+    if (this.knownAttributes.has(name)) return undefined; // also a plain attribute somewhere: ambiguous, leave alone
+    return this.localKnown.properties[name] ?? this.known?.properties[name];
+  }
+
+  /** How a read of property `name` is rendered (`total()`, `getTotal()`, `isEmpty()`), or undefined when not a property. */
+  private propertyGetter(name: string): string | undefined {
+    const info = this.propertyInfo(name);
+    if (!info) return undefined;
+    if (this.input.lombokStyle && info.trivial) return `${info.boolean ? 'is' : 'get'}${toPascalCase(name)}()`;
+    return `${name}()`;
+  }
+
+  /** Method name a write to property `name` is rendered with (`total`, `setTotal`), or undefined. */
+  private propertySetter(name: string): string | undefined {
+    const info = this.propertyInfo(name);
+    if (!info || !info.setter) return undefined;
+    return this.input.lombokStyle && info.trivial ? `set${toPascalCase(name)}` : name;
+  }
+
+  /** Type of a name in scope: locals/params of enclosing functions, then module-level declarations. */
+  private lookupName(name: string): string | undefined {
+    for (let i = this.stack.length - 1; i >= 0; i -= 1) {
+      const t = this.stack[i].types?.get(name);
+      if (t) return t;
+    }
+    return this.scan.moduleTypes.get(name);
+  }
+
+  /** Superclass (first base) of a class declared in this file, when it is a plain name. */
+  private baseOf(className: string): string | undefined {
+    const base = this.scan.classes.get(className)?.bases.find((b) => !/^(ABC|abc\.ABC|Protocol|typing\.Protocol|Generic\[.*\]|object)$/.test(b));
+    return base ? classNameOf(base.replace(/\[.*$/, '')) : undefined;
+  }
+
+  private returnTypeOf(className: string | undefined, method: string): string | undefined {
+    if (!className) return this.scan.functions.get(method) ?? this.known?.returnTypes[method];
+    const visited = new Set<string>();
+    for (let c: string | undefined = className; c && !visited.has(c); c = this.baseOf(c)) {
+      visited.add(c);
+      const local = this.scan.classes.get(c);
+      const r = local?.methods.get(method) ?? this.propertyTypeOf(c, method) ?? this.known?.returnTypes[`${c}.${method}`];
+      if (r) return r;
+    }
+    return undefined;
+  }
+
+  private propertyTypeOf(className: string, prop: string): string | undefined {
+    const p = this.scan.classes.get(className)?.properties.get(prop);
+    if (!p) return this.known?.returnTypes[`${className}.${prop}`];
+    return p.returnType ?? (p.trivialField ? this.fieldTypeOf(className, p.trivialField) : undefined);
+  }
+
+  private fieldTypeOf(className: string | undefined, field: string, fieldsSoFar?: Map<string, FieldInfo>): string | undefined {
+    const soFar = fieldsSoFar?.get(field)?.type;
+    if (soFar && soFar !== 'Object') return soFar;
+    if (!className) return undefined;
+    const visited = new Set<string>();
+    for (let c: string | undefined = className; c && !visited.has(c); c = this.baseOf(c)) {
+      visited.add(c);
+      const t = this.scan.classes.get(c)?.fields.get(field) ?? this.known?.fieldTypes[`${c}.${field}`];
+      if (t && t !== 'Object') return t;
+    }
+    return undefined;
+  }
+
+  /** `callee(args)` when `t` is exactly one call expression. */
+  private static splitCall(t: string): { callee: string } | undefined {
+    const open = t.indexOf('(');
+    if (open <= 0 || !t.endsWith(')')) return undefined;
+    const callee = t.slice(0, open);
+    if (!/^[\w.]+$/.test(callee)) return undefined;
+    let depth = 0;
+    for (let i = open; i < t.length; i += 1) {
+      if (t[i] === '(') depth += 1;
+      else if (t[i] === ')') {
+        depth -= 1;
+        if (depth === 0) return i === t.length - 1 ? { callee } : undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /** Class a receiver expression denotes: `self`/`cls` -> the enclosing class, `Foo` -> Foo, otherwise the class of its type. */
+  private receiverClass(recv: string, lits: string[], opts: { className?: string; fields?: Map<string, FieldInfo> }): string | undefined {
+    if (recv === 'self' || recv === 'cls') return opts.className ?? this.nearestClass()?.className;
+    if (/^[A-Z]\w*$/.test(recv) && (this.scan.classes.has(recv) || Object.keys(this.known?.returnTypes ?? {}).some((k) => k.startsWith(`${recv}.`)))) return recv;
+    return classNameOf(this.typeOf(recv, lits, opts));
+  }
+
+  /**
+   * Java type of a masked Python expression, from what is in scope: names, `self.field`,
+   * calls to functions/methods with return hints (including on typed receivers), and
+   * attribute reads on typed receivers. Undefined when unknown.
+   */
+  private typeOf(masked: string, lits: string[], opts: { className?: string; fields?: Map<string, FieldInfo> } = {}): string | undefined {
+    const t = masked.trim();
+    const className = opts.className ?? this.nearestClass()?.className;
+    let m: RegExpExecArray | null;
+    if (/^\w+$/.test(t)) return this.lookupName(t);
+    if ((m = /^(self|cls)\.(\w+)$/.exec(t))) return this.fieldTypeOf(className, m[2], opts.fields) ?? (className ? this.propertyTypeOf(className, m[2]) : undefined);
+    const call = RuleTranslation.splitCall(t);
+    if (call) {
+      if (/^\w+$/.test(call.callee)) return this.returnTypeOf(undefined, call.callee) ?? (/^[A-Z]/.test(call.callee) ? call.callee : undefined);
+      const dot = /^(.+)\.(\w+)$/.exec(call.callee);
+      if (!dot) return undefined;
+      const recvClass = this.receiverClass(dot[1], lits, opts);
+      if (recvClass) return this.returnTypeOf(recvClass, dot[2]);
+      return /^[A-Z]\w*$/.test(dot[2]) ? dot[2] : undefined;
+    }
+    if ((m = /^(.+)\.(\w+)$/.exec(t))) {
+      const recvClass = this.receiverClass(m[1], lits, opts);
+      return recvClass ? this.fieldTypeOf(recvClass, m[2]) ?? this.propertyTypeOf(recvClass, m[2]) : undefined;
+    }
+    return undefined;
+  }
+
+  /** Type for a value being assigned: literal shapes first, then whatever the type environment knows. */
+  private inferValueType(masked: string, lits: string[]): string {
+    const t = inferTypeFromMaskedValue(masked, lits);
+    return t === 'var' ? this.typeOf(masked, lits) ?? 'var' : t;
   }
 
   /** Enclosing class names, outermost first, always starting with the module class. */
@@ -291,6 +427,7 @@ class RuleTranslation {
 
   /** Next code line index after i (skipping blanks/comments) if it is a docstring for the block opened at i. */
   private docstringAfter(i: number): number {
+    if (this.inlineBody !== undefined) return -1; // a one-liner has no block to hold a docstring
     const header = this.lines[i];
     for (let j = i + 1; j < this.lines.length; j += 1) {
       const l = this.lines[j];
@@ -418,6 +555,9 @@ class RuleTranslation {
     header.push({ text: 'import java.util.*;', py: 0 });
     header.push({ text: 'import java.util.function.*;', py: 0 });
     header.push({ text: 'import java.util.stream.*;', py: 0 });
+    if (this.out.some((l) => /\b(BufferedReader|FileReader|PrintWriter|FileWriter|FileInputStream|FileOutputStream)\b/.test(l.text))) {
+      header.push({ text: 'import java.io.*;', py: 0 });
+    }
     if (this.imports.length) {
       header.push({ text: '', py: 0 });
       header.push(...this.imports);
@@ -429,13 +569,22 @@ class RuleTranslation {
     // Trim trailing blank lines from body
     while (this.out.length && this.out[this.out.length - 1].text === '') this.out.pop();
     const all = [...header, ...this.out, { text: '}', py: 0 }, { text: '', py: 0 }];
+    // An emitted statement can span several physical lines (text blocks), so the source map
+    // and the symbols' line numbers are built from physical lines, not from emitted entries.
+    const sourceMap: number[] = [];
+    const physicalLineOf: number[] = [];
+    for (const l of all) {
+      physicalLineOf.push(sourceMap.length);
+      const count = l.text.split('\n').length;
+      for (let k = 0; k < count; k += 1) sourceMap.push(l.py);
+    }
     const symbols: SymbolInfo[] = [
-      { name: this.moduleClass, kind: 'class', container: [], javaLine: header.length - 1, pythonLine: 1 },
-      ...this.symbols.map((s) => ({ name: s.name, kind: s.kind, container: s.container, javaLine: header.length + s.javaLineRaw, pythonLine: s.py })),
+      { name: this.moduleClass, kind: 'class', container: [], javaLine: physicalLineOf[header.length - 1], pythonLine: 1 },
+      ...this.symbols.map((s) => ({ name: s.name, kind: s.kind, container: s.container, javaLine: physicalLineOf[header.length + s.javaLineRaw], pythonLine: s.py })),
     ];
     return {
       java: all.map((l) => l.text).join('\n'),
-      sourceMap: all.map((l) => l.py),
+      sourceMap,
       symbols,
       warnings: this.warnings,
       engine: 'rules',
@@ -444,12 +593,27 @@ class RuleTranslation {
 
   private translateCode(i: number): void {
     const line = this.lines[i];
+    const py = line.startLine;
+
+    // `case` is not a continuation like `else`/`except`: each case arm is its own `{ ... }`,
+    // so the previous arm must be closed with a normal `}` before the next one opens.
+    const continuation = /^(elif\b|else\b|except\b|finally\b)/.test(line.text);
+    this.closeBlocksTo(line.indent, continuation);
+    if (continuation) {
+      // Comments between a block and its else/except belong inside the closing block.
+      this.pendingTrivia = this.pendingTrivia.filter((t) => t.kind !== 'blank');
+    }
+    // Comments from inside a multi-line statement go right above it.
+    for (const c of line.comments ?? []) this.pendingTrivia.push({ kind: 'comment', text: `# ${c}`, py });
+    this.flushTrivia();
+
+    // Masking renders f-strings, whose fields need this statement's context (see expressions.ts).
+    setFStringExpressionContext(this.exprCtx());
     const masked = maskStrings(line.text);
     const split = this.splitComment(masked.text);
     const code = split.code;
     let comment = split.comment;
     const lits = masked.literals;
-    const py = line.startLine;
     const un = (s: string) => unmaskStrings(s, lits);
 
     if (code === '') {
@@ -457,15 +621,49 @@ class RuleTranslation {
       return;
     }
 
-    // `case` is not a continuation like `else`/`except`: each case arm is its own `{ ... }`,
-    // so the previous arm must be closed with a normal `}` before the next one opens.
-    const continuation = /^(elif\b|else\b|except\b|finally\b)/.test(code);
-    this.closeBlocksTo(line.indent, continuation);
-    if (continuation) {
-      // Comments between a block and its else/except belong inside the closing block.
-      this.pendingTrivia = this.pendingTrivia.filter((t) => t.kind !== 'blank');
+    // `if x: return 1`, `except: pass`, `def f(): return 1` - a compound statement with its body
+    // on the same line. The header opens the block as usual; the body is translated inside it,
+    // and the block closes when the next line (at the same or a lower indent) is reached, so a
+    // following `else:` / `except:` still chains onto it.
+    const oneLiner = this.splitOneLineCompound(code);
+    if (oneLiner) {
+      this.inlineBody = oneLiner.body;
+      try {
+        this.translateStatement(i, line, `${oneLiner.header}:`, lits, un, py, comment);
+      } finally {
+        this.inlineBody = undefined;
+      }
+      for (const stmt of splitTopLevel(oneLiner.body, ';')) this.translateSimple(stmt.trim(), lits, py, '');
+      return;
     }
-    this.flushTrivia();
+    this.translateStatement(i, line, code, lits, un, py, comment);
+  }
+
+  /** Body of a one-line compound statement being translated, if any (see translateCode). */
+  private inlineBody: string | undefined;
+
+  /** `header: body` when `code` is a compound statement with an inline body, else undefined. */
+  private splitOneLineCompound(code: string): { header: string; body: string } | undefined {
+    if (!/^(async\s+)?(if|elif|else|for|while|try|except|finally|with|def|class|case)\b/.test(code) || /:$/.test(code)) return undefined;
+    let depth = 0;
+    for (let k = 0; k < code.length; k += 1) {
+      const ch = code[k];
+      if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+      else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+      else if (ch === ':' && depth === 0 && code[k + 1] !== '=') {
+        const header = code.slice(0, k).trim();
+        const body = code.slice(k + 1).trim();
+        // A top-level lambda's colon would be mistaken for the header's; leave such lines alone.
+        if (!body || /\blambda\b/.test(header)) return undefined;
+        return { header, body };
+      }
+    }
+    return undefined;
+  }
+
+  private translateStatement(i: number, line: LogicalLine, code: string, lits: string[], un: (s: string) => string, py: number, comment: string): void {
+    const masked = { literals: lits };
+    void masked;
 
     // decorators
     if (code.startsWith('@')) {
@@ -500,17 +698,17 @@ class RuleTranslation {
     }
 
     // compound statements
-    if ((m = /^class\s+(\w+)\s*(?:\((.*)\))?\s*:$/.exec(code))) {
-      this.translateClass(i, m[1], m[2] ?? '', comment);
+    if ((m = /^class\s+(\w+)\s*(\[[^\]]*\])?\s*(?:\((.*)\))?\s*:$/.exec(code))) {
+      this.translateClass(i, m[1], m[3] ?? '', comment, typeParamsOf(m[2]));
       return;
     }
-    if ((m = /^(async\s+)?def\s+(\w+)\s*\((.*)\)\s*(?:->\s*(.+?))?\s*:$/.exec(code))) {
-      this.translateDef(i, Boolean(m[1]), m[2], un(m[3]), m[4] ? un(m[4]) : undefined, comment);
+    if ((m = /^(async\s+)?def\s+(\w+)\s*(\[[^\]]*\])?\s*\((.*)\)\s*(?:->\s*(.+?))?\s*:$/.exec(code))) {
+      this.translateDef(i, Boolean(m[1]), m[2], un(m[4]), m[5] ? un(m[5]) : undefined, comment, typeParamsOf(m[3]));
       return;
     }
     if (/^if\s+__name__\s*==\s*.\d+.\s*:$/.test(code)) {
       this.emit(`public static void main(String[] args) {${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'main', declared: new Set(['args']) });
+      this.stack.push({ indent: line.indent, kind: 'main', declared: new Set(['args']), types: new Map([['args', 'String[]']]) });
       return;
     }
     if ((m = /^if\s+(.+):$/.exec(code))) {
@@ -536,7 +734,7 @@ class RuleTranslation {
       return;
     }
     if ((m = /^(async\s+)?for\s+(.+?)\s+in\s+(.+):$/.exec(code))) {
-      this.translateFor(line, m[2], un(m[3]), Boolean(m[1]), comment);
+      this.translateFor(line, m[2], m[3], lits, Boolean(m[1]), comment);
       return;
     }
     if (/^try\s*:$/.test(code)) {
@@ -562,12 +760,12 @@ class RuleTranslation {
       return;
     }
     if ((m = /^match\s+(.+):$/.exec(code))) {
-      this.emit(`switch (${un(translateMaskedExpression(m[1], this.exprCtx()))}) {${comment}`, py);
+      this.emit(`switch (${un(translateMaskedExpression(m[1], this.exprCtx(lits)))}) {${comment}`, py);
       this.stack.push({ indent: line.indent, kind: 'match' });
       return;
     }
     if ((m = /^case\s+(.+):$/.exec(code))) {
-      const pattern = m[1].trim() === '_' ? 'default' : `case ${un(translateMaskedExpression(m[1], this.exprCtx()))}`;
+      const pattern = m[1].trim() === '_' ? 'default' : `case ${un(translateMaskedExpression(m[1], this.exprCtx(lits)))}`;
       this.emit(`${pattern} -> {${comment}`, py);
       this.stack.push({ indent: line.indent, kind: 'case' });
       return;
@@ -600,9 +798,11 @@ class RuleTranslation {
   }
 
   private condition(maskedCond: string, lits: string[]): string {
-    const translated = unmaskStrings(translateMaskedExpression(maskedCond.trim(), this.exprCtx()), lits);
-    // Python truthiness: a bare value is "true" when non-null and non-empty.
-    if (/^!?[\w.]+(\(\))?$/.test(translated) && !/^(true|false|null)$/.test(translated)) {
+    const translated = unmaskStrings(translateMaskedExpression(maskedCond.trim(), this.exprCtx(lits)), lits);
+    // Python truthiness: a bare value is "true" when non-null and non-empty - unless it is known to be a boolean.
+    const bare = maskedCond.trim().replace(/^not\s+/, '');
+    const isBoolean = /^boolean\b/.test(this.typeOf(bare, lits) ?? '');
+    if (!isBoolean && /^!?[\w.]+(\(\))?$/.test(translated) && !/^(true|false|null)$/.test(translated)) {
       return `${translated} /* ${translated.startsWith('!') ? 'falsy: null or empty' : 'truthy: non-null and non-empty'} */`;
     }
     return translated;
@@ -610,7 +810,7 @@ class RuleTranslation {
 
   // ------------------------------------------------------------------ class
 
-  private translateClass(i: number, name: string, basesText: string, comment: string): void {
+  private translateClass(i: number, name: string, basesText: string, comment: string, pep695TypeParams: string[] = []): void {
     const line = this.lines[i];
     const py = line.startLine;
     const decorators = this.takeDecorators();
@@ -619,7 +819,7 @@ class RuleTranslation {
     const isRecord = bases.some((b) => RECORD_BASES.has(b.split('.').pop()!)) || decorators.some((d) => RECORD_DECORATORS.test(d.text));
     const isAbstract = bases.some((b) => /^(ABC|abc\.ABC)$/.test(b));
     const isInterface = bases.some((b) => /^(Protocol|typing\.Protocol)$/.test(b));
-    const generics = bases.map((b) => /^Generic\[(.+)\]$/.exec(b)?.[1]).filter(Boolean);
+    const generics = [...pep695TypeParams, ...bases.map((b) => /^Generic\[(.+)\]$/.exec(b)?.[1]).filter(Boolean)];
     const realBases = bases.filter((b) => !/^(ABC|abc\.ABC|Protocol|typing\.Protocol|Generic\[.*\]|object)$/.test(b) && !ENUM_BASES.has(b.split('.').pop()!) && !RECORD_BASES.has(b.split('.').pop()!));
 
     const doc = this.docstringAfter(i);
@@ -640,7 +840,10 @@ class RuleTranslation {
 
     // Field declarations for attributes assigned via self.x = ... anywhere in the class, and
     // (in Lombok style) the plan for which boilerplate we can collapse into annotations instead.
-    const fields = !isEnum ? this.collectSelfFields(i) : [];
+    const fields = !isEnum ? this.collectSelfFields(i, name) : [];
+    // Field types resolved with the full environment beat the scan's first guess for later lookups.
+    const scanned = this.scan.classes.get(name);
+    if (scanned) for (const f of fields) if (f.type !== 'Object') scanned.fields.set(f.name, f.type);
     const lombokPlan = !isEnum && !isInterface ? this.buildLombokPlan(i, fields, isRecord) : undefined;
     for (const ann of lombokPlan?.annotations ?? []) this.emit(ann, py);
 
@@ -662,7 +865,13 @@ class RuleTranslation {
     this.usedNames.add(name);
     this.recordSymbol(name, 'class', py);
 
-    const block: Block = { indent: line.indent, kind: 'class', className: name, isEnum, isRecord, isInterface, lombokPlan };
+    // Lombok style: a backing field behind a trivial property is named after the property, so
+    // @Getter/@Setter produce getPlaced()/setPlaced() rather than get_placed().
+    const fieldRenames = new Map<string, string>();
+    for (const [propName, plan] of lombokPlan?.properties ?? []) {
+      if (plan.field !== propName && !fields.some((f) => f.name === propName)) fieldRenames.set(plan.field, propName);
+    }
+    const block: Block = { indent: line.indent, kind: 'class', className: name, isEnum, isRecord, isInterface, lombokPlan, fieldRenames };
     this.stack.push(block);
 
     if (!isEnum) {
@@ -680,8 +889,9 @@ class RuleTranslation {
           const parts = [fieldAnn.getter ? '@Getter' : '', fieldAnn.setter ? '@Setter' : ''].filter(Boolean);
           this.emit(parts.join(' '), f.py);
         }
-        this.emit(`${visibility} ${f.type} ${f.name}; // assigned as self.${f.name} in ${f.where}`, f.py);
-        this.recordSymbol(f.name, 'field', f.py);
+        const javaName = fieldRenames.get(f.name) ?? f.name;
+        this.emit(`${visibility} ${f.type} ${javaName}; // assigned as self.${f.name} in ${f.where}`, f.py);
+        this.recordSymbol(javaName, 'field', f.py);
       }
       if (toEmit.length) this.emit('', 0, 0);
     }
@@ -719,7 +929,7 @@ class RuleTranslation {
         pendingDecos.push(code);
         continue;
       }
-      const d = /^(?:async\s+)?def\s+(\w+)\s*\((.*)\)/.exec(code);
+      const d = /^(?:async\s+)?def\s+(\w+)\s*(?:\[[^\]]*\])?\s*\((.*)\)/.exec(code);
       if (d) {
         defs.push({ index: j, name: d[1], params: splitTopLevel(d[2]).map((p) => p.trim()).filter(Boolean), decorators: pendingDecos });
       }
@@ -804,43 +1014,13 @@ class RuleTranslation {
     return 4;
   }
 
-  private collectSelfFields(i: number): { name: string; type: string; py: number; where: string }[] {
-    const header = this.lines[i];
-    const seen = new Map<string, { name: string; type: string; py: number; where: string }>();
-    let currentDef = '';
-    let paramTypes = new Map<string, string>();
-    for (let j = i + 1; j < this.lines.length; j += 1) {
-      const l = this.lines[j];
-      if (l.kind !== 'code') continue;
-      if (l.indent <= header.indent) break;
-      const d = /^(?:async\s+)?def\s+(\w+)\s*\((.*)\)/.exec(l.text);
-      if (d) {
-        currentDef = d[1];
-        paramTypes = new Map();
-        for (const p of splitTopLevel(d[2])) {
-          const pm = /^\**(\w+)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.+))?$/.exec(p.trim());
-          if (!pm) continue;
-          if (pm[2]) paramTypes.set(pm[1], translateType(pm[2]));
-          else if (pm[3]) paramTypes.set(pm[1], this.typeFromDefault(pm[3]));
-        }
-        continue;
-      }
-      const masked = maskStrings(l.text);
-      const code = this.splitComment(masked.text).code;
-      const m = /^self\.(\w+)\s*(?::\s*([^=]+?))?\s*(?:=|\+=|-=)\s*(.+)$/.exec(code);
-      if (m && !seen.has(m[1])) {
-        const rhs = m[3].trim();
-        const fromParam = /^\w+$/.test(rhs) ? paramTypes.get(rhs) : /^(\w+)\s+or\s+/.exec(rhs) ? paramTypes.get(/^(\w+)/.exec(rhs)![1]) : undefined;
-        const type = m[2] ? translateType(unmaskStrings(m[2], masked.literals)) : fromParam ?? inferTypeFromMaskedValue(m[3], masked.literals);
-        seen.set(m[1], { name: m[1], type: type === 'var' ? 'Object' : type, py: l.startLine, where: currentDef ? `${currentDef}()` : 'class body' });
-      }
-    }
-    return [...seen.values()];
+  private collectSelfFields(i: number, className: string): FieldInfo[] {
+    return collectSelfFields(this.lines, i, (masked, lits, soFar) => this.typeOf(masked, lits, { className, fields: soFar }));
   }
 
   // -------------------------------------------------------------------- def
 
-  private translateDef(i: number, isAsync: boolean, name: string, paramsText: string, returnHint: string | undefined, comment: string): void {
+  private translateDef(i: number, isAsync: boolean, name: string, paramsText: string, returnHint: string | undefined, comment: string, typeParams: string[] = []): void {
     const line = this.lines[i];
     const py = line.startLine;
     const decorators = this.takeDecorators();
@@ -884,6 +1064,7 @@ class RuleTranslation {
 
     // parameters
     const declared = new Set<string>();
+    const types = new Map<string, string>();
     const params: string[] = [];
     const paramNames: string[] = [];
     const rawParams = splitTopLevel(paramsText).map((p) => p.trim()).filter(Boolean);
@@ -895,12 +1076,15 @@ class RuleTranslation {
       if ((pm = /^\*\*(\w+)/.exec(p))) {
         params.push(`Map<String, Object> ${pm[1]} /* **kwargs */`);
         declared.add(pm[1]);
+        types.set(pm[1], 'Map<String, Object>');
         paramNames.push(pm[1]);
         return;
       }
       if ((pm = /^\*(\w+)(?::\s*(.+))?/.exec(p))) {
-        params.push(`${pm[2] ? boxed(translateType(pm[2])) : 'Object'}... ${pm[1]}`);
+        const elem = pm[2] ? boxed(translateType(pm[2])) : 'Object';
+        params.push(`${elem}... ${pm[1]}`);
         declared.add(pm[1]);
+        types.set(pm[1], `${elem}[]`);
         paramNames.push(pm[1]);
         return;
       }
@@ -911,9 +1095,10 @@ class RuleTranslation {
       }
       const [, pname, hint, def] = parsed;
       declared.add(pname);
-      let type = hint ? translateType(hint) : def ? this.typeFromDefault(def) : 'Object';
+      let type = hint ? translateType(hint) : def ? typeFromDefault(def) : 'Object';
       if (def !== undefined && def.trim() === 'None' && !/nullable/.test(type)) type += ' /* nullable */';
       params.push(def !== undefined ? `${type} ${pname} /* = ${this.expr(def)} */` : `${type} ${pname}`);
+      if (type !== 'Object') types.set(pname, type);
       paramNames.push(pname);
     });
 
@@ -948,8 +1133,8 @@ class RuleTranslation {
       for (const l of this.methodJavadoc(name, docLine, isCtor, cls?.className, dunderDoc, paramNames, ret, py)) this.emit(l.text, l.py);
     }
     for (const d of otherDecorators) this.emit(this.decoratorToAnnotation(d.text), d.py);
-    if (isProperty) this.emit('@Property // accessed like a field in Python: obj.name', py);
-    if (isSetter) this.emit('@Setter // assigned like a field in Python: obj.name = value', py);
+    if (isProperty) this.emit(`@Property // Python property: read as obj.${name}, rendered as obj.${name}()`, py);
+    if (isSetter) this.emit(`@Setter // Python setter: obj.${name} = value, rendered as obj.${name}(value)`, py);
 
     const nested = !inClass && this.enclosingScope() && this.enclosingScope()!.kind !== 'class';
     if (nested) {
@@ -957,7 +1142,8 @@ class RuleTranslation {
       modifiers = modifiers.filter((mod) => mod !== 'static');
     }
 
-    const signature = `${modifiers.join(' ')}${modifiers.length ? ' ' : ''}${isCtor ? '' : `${ret} `}${javaName}(${params.join(', ')})`;
+    const generic = typeParams.length ? `<${typeParams.join(', ')}> ` : '';
+    const signature = `${modifiers.join(' ')}${modifiers.length ? ' ' : ''}${generic}${isCtor ? '' : `${ret} `}${javaName}(${params.join(', ')})`;
     const body = isAbstract || cls?.isInterface ? ';' : ' {';
     this.emit(`${signature}${body}${comment}`, py);
     this.recordSymbol(javaName, 'method', py);
@@ -973,7 +1159,7 @@ class RuleTranslation {
       // Unusual: abstract method with a real body - reopen as a block.
       this.out[this.out.length - 1].text = this.out[this.out.length - 1].text.replace(/;(\s*\/\/.*)?$/, ' {$1');
     }
-    this.stack.push({ indent: line.indent, kind: 'def', declared });
+    this.stack.push({ indent: line.indent, kind: 'def', declared, types });
   }
 
   private skipRanges: Array<[number, number]> = [];
@@ -994,13 +1180,12 @@ class RuleTranslation {
     }
   }
 
-  private typeFromDefault(def: string): string {
-    const masked = maskStrings(def);
-    const t = inferTypeFromMaskedValue(masked.text, masked.literals);
-    return t === 'var' ? 'Object' : t;
-  }
-
   private inferReturnType(i: number): string {
+    if (this.inlineBody !== undefined) {
+      const inline = this.splitComment(maskStrings(this.inlineBody).text).code;
+      if (/\byield\b/.test(inline)) return 'Iterator<Object> /* generator */';
+      return /^return\s+\S/.test(inline) ? 'Object' : 'void';
+    }
     const body = this.bodyLines(i);
     const headerIndent = this.lines[i].indent;
     let sawValue = false;
@@ -1021,18 +1206,31 @@ class RuleTranslation {
 
   // -------------------------------------------------------------------- for
 
-  private translateFor(line: LogicalLine, target: string, iterable: string, isAsync: boolean, comment: string): void {
+  private translateFor(line: LogicalLine, target: string, maskedIterable: string, lits: string[], isAsync: boolean, comment: string): void {
     const py = line.startLine;
+    const iterable = unmaskStrings(maskedIterable, lits);
     const asyncNote = isAsync ? ' /* async for */' : '';
     const targets = splitTopLevel(stripOuterParens(target)).map((t) => t.trim());
-    const declared = this.enclosingScope()?.declared;
+    const scope = this.enclosingScope();
+    const declared = scope?.declared;
     targets.forEach((t) => declared?.add(t));
+    // Element type from the iterable's type: List<Order> -> Order, Map<K, V>.items() -> K, V.
+    const iterMasked = maskedIterable.trim();
+    const view = /\.(items|values|keys)\(\)$/.exec(iterMasked)?.[1];
+    const collType = this.typeOf(view ? iterMasked.replace(/\.(items|values|keys)\(\)$/, '') : iterMasked, lits);
+    const mapTypes = mapTypesOf(collType);
+    const elem = view === 'values' ? mapTypes?.[1] : view === 'keys' || (mapTypes && !view) ? mapTypes?.[0] : view ? undefined : elementTypeOf(collType);
+    const typed = (name: string, type: string | undefined): string => {
+      if (type) scope?.types?.set(name, type);
+      return `${type ?? 'var'} ${name}`;
+    };
     let m: RegExpExecArray | null;
 
     if ((m = /^range\((.*)\)$/.exec(iterable.trim())) && targets.length === 1) {
       const args = splitTopLevel(m[1]).map((a) => this.expr(a));
       const v = targets[0];
       let header: string;
+      scope?.types?.set(v, 'int');
       if (args.length === 1) header = `for (int ${v} = 0; ${v} < ${args[0]}; ${v}++)`;
       else if (args.length === 2) header = `for (int ${v} = ${args[0]}; ${v} < ${args[1]}; ${v}++)`;
       else {
@@ -1051,9 +1249,11 @@ class RuleTranslation {
       const [idx, item] = targets;
       const simple = /^[\w.]+$/.test(coll);
       if (simple) {
+        scope?.types?.set(idx, 'int');
+        const itemType = elementTypeOf(this.typeOf(args[0].trim(), lits));
         this.emit(`for (int ${idx} = ${start}; ${idx} < ${coll}.size()${start !== '0' ? ` + ${start}` : ''}; ${idx}++) {${asyncNote}${comment}`, py);
         this.stack.push({ indent: line.indent, kind: 'for' });
-        this.emit(`var ${item} = ${coll}.get(${idx}${start !== '0' ? ` - ${start}` : ''});`, py);
+        this.emit(`${typed(item, itemType)} = ${coll}.get(${idx}${start !== '0' ? ` - ${start}` : ''});`, py);
         return;
       }
     }
@@ -1062,8 +1262,8 @@ class RuleTranslation {
       const [k, v] = targets;
       this.emit(`for (var entry : ${mapExpr}.entrySet()) {${asyncNote}${comment}`, py);
       this.stack.push({ indent: line.indent, kind: 'for' });
-      this.emit(`var ${k} = entry.getKey();`, py);
-      this.emit(`var ${v} = entry.getValue();`, py);
+      this.emit(`${typed(k, mapTypes?.[0])} = entry.getKey();`, py);
+      this.emit(`${typed(v, mapTypes?.[1])} = entry.getValue();`, py);
       return;
     }
     if ((m = /^zip\((.*)\)$/.exec(iterable.trim())) && targets.length >= 2) {
@@ -1075,9 +1275,10 @@ class RuleTranslation {
         return;
       }
     }
-    const iter = this.expr(iterable);
+    // Iterating a Map in Python walks its keys.
+    const iter = this.expr(iterable) + (mapTypes && !view ? '.keySet()' : '');
     if (targets.length === 1) {
-      this.emit(`for (var ${targets[0]} : ${iter}) {${asyncNote}${comment}`, py);
+      this.emit(`for (${typed(targets[0], elem)} : ${iter}) {${asyncNote}${comment}`, py);
     } else {
       this.emit(`for (var (${targets.join(', ')}) : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
     }
@@ -1099,9 +1300,9 @@ class RuleTranslation {
       if (m) {
         allBare = false;
         declared?.add(m[2]);
-        resources.push(`var ${m[2]} = ${unmaskStrings(translateMaskedExpression(m[1], this.exprCtx()), lits)}`);
+        resources.push(`var ${m[2]} = ${unmaskStrings(translateMaskedExpression(m[1], this.exprCtx(lits)), lits)}`);
       } else {
-        const ctx = unmaskStrings(translateMaskedExpression(item.trim(), this.exprCtx()), lits);
+        const ctx = unmaskStrings(translateMaskedExpression(item.trim(), this.exprCtx(lits)), lits);
         if (/^[\w.]+$/.test(ctx) && /lock|mutex|semaphore/i.test(ctx)) {
           resources.push(`synchronized:${ctx}`);
         } else {
@@ -1123,7 +1324,8 @@ class RuleTranslation {
 
   private translateSimple(code: string, lits: string[], py: number, comment: string): void {
     const un = (s: string) => unmaskStrings(s, lits);
-    const ex = (s: string) => un(translateMaskedExpression(s, this.exprCtx()));
+    const ex = (s: string) => un(translateMaskedExpression(s, this.exprCtx(lits)));
+    const exValue = (s: string) => un(translateMaskedExpression(s, this.exprCtx(lits, true)));
     let m: RegExpExecArray | null;
 
     if (code === 'pass') return this.emit(`// pass${comment}`, py);
@@ -1132,7 +1334,7 @@ class RuleTranslation {
     if (code === 'return') return this.emit(`return;${comment}`, py);
     if ((m = /^return\s+(.+)$/.exec(code))) {
       const parts = splitTopLevel(m[1]);
-      const value = parts.length > 1 ? `Tuple.of(${parts.map(ex).join(', ')})` : ex(m[1]);
+      const value = parts.length > 1 ? `Tuple.of(${parts.map(exValue).join(', ')})` : exValue(m[1]);
       return this.emit(`return ${value};${comment}`, py);
     }
     if (code === 'raise') {
@@ -1181,6 +1383,12 @@ class RuleTranslation {
         const key = ex(sub[2]);
         return this.emit(`${recv}.put(${key}, ${recv}.get(${key}) ${op} ${value});${comment}`, py);
       }
+      const attr = /^(.+)\.(\w+)$/.exec(target);
+      const setter = attr ? this.propertySetter(attr[2]) : undefined;
+      if (attr && setter) {
+        const recv = ex(attr[1]);
+        return this.emit(`${recv}.${setter}(${recv}.${this.propertyGetter(attr[2])} ${op} ${value});${comment}`, py);
+      }
       const t = ex(target);
       if (op === '**') return this.emit(`${t} = Math.pow(${t}, ${value});${comment}`, py);
       if (op === '//') return this.emit(`${t} = Math.floorDiv(${t}, ${value});${comment}`, py);
@@ -1223,7 +1431,8 @@ class RuleTranslation {
 
   private translateAssignment(code: string, eq: number, lits: string[], py: number, comment: string): void {
     const un = (s: string) => unmaskStrings(s, lits);
-    const ex = (s: string) => un(translateMaskedExpression(s, this.exprCtx()));
+    const ex = (s: string) => un(translateMaskedExpression(s, this.exprCtx(lits)));
+    const exValue = (s: string) => un(translateMaskedExpression(s, this.exprCtx(lits, true)));
 
     // chained: a = b = value  -> assign right-to-left
     const segments: string[] = [];
@@ -1238,7 +1447,7 @@ class RuleTranslation {
     if (/^TypeVar\(/.test(valueMasked.trim()) && segments.length === 1) {
       return this.emit(`// type variable ${segments[0]} = ${un(valueMasked)}${comment}`, py);
     }
-    let valueJava = ex(valueMasked);
+    let valueJava = exValue(valueMasked);
     let valueMaskedForType = valueMasked;
 
     let m: RegExpExecArray | null;
@@ -1252,12 +1461,16 @@ class RuleTranslation {
         if (fieldDefault) rhsJava = this.dataclassFieldDefault(fieldDefault[1], lits);
         this.emitFieldOrLocal(ann[1], translateType(un(ann[2])), rhsJava, py, comment);
       } else if (/^self\.\w+$/.test(target)) {
-        this.emit(`this.${target.slice(5)} = ${valueJava};${comment}`, py);
+        const field = target.slice(5);
+        const setter = this.propertySetter(field);
+        const renamed = this.nearestClass()?.fieldRenames?.get(field) ?? field;
+        this.emit(setter ? `this.${setter}(${valueJava});${comment}` : `this.${renamed} = ${valueJava};${comment}`, py);
       } else if ((m = /^self\.(\w+)\s*:\s*(.+)$/.exec(target))) {
         // self.x: T = value - the type is already declared in the field list.
-        this.emit(`this.${m[1]} = ${valueJava}; // ${translateType(un(m[2]))}${comment}`, py);
+        const renamed = this.nearestClass()?.fieldRenames?.get(m[1]) ?? m[1];
+        this.emit(`this.${renamed} = ${valueJava}; // ${translateType(un(m[2]))}${comment}`, py);
       } else if (/^\w+$/.test(target)) {
-        this.emitFieldOrLocal(target, inferTypeFromMaskedValue(valueMaskedForType, lits), valueJava, py, comment);
+        this.emitFieldOrLocal(target, this.inferValueType(valueMaskedForType, lits), valueJava, py, comment);
       } else if (/^\(?[\w.]+(\s*,\s*[\w.]+)+\)?$/.test(target) || /^\[.*\]$/.test(target) && !/^\w+\[/.test(target)) {
         const names = splitTopLevel(target.replace(/^[(\[]|[)\]]$/g, '')).map((n) => n.trim());
         const scope = this.enclosingScope();
@@ -1266,8 +1479,12 @@ class RuleTranslation {
         this.emit(`${isNew ? 'var ' : ''}(${names.join(', ')}) = ${valueJava}; // tuple unpacking${comment}`, py);
       } else {
         const sub = /^(.+)\[(.+)\]$/.exec(target);
+        const attr = /^(.+)\.(\w+)$/.exec(target);
+        const setter = attr ? this.propertySetter(attr[2]) : undefined;
         if (sub) {
           this.emit(`${ex(sub[1])}.put(${ex(sub[2])}, ${valueJava});${comment}`, py);
+        } else if (attr && setter) {
+          this.emit(`${ex(attr[1])}.${setter}(${valueJava});${comment}`, py);
         } else {
           this.emit(`${ex(target)} = ${valueJava};${comment}`, py);
         }
@@ -1285,9 +1502,9 @@ class RuleTranslation {
       const m = /^(default_factory|default)\s*=\s*(.+)$/.exec(a.trim());
       if (!m) continue;
       const v = m[2].trim();
-      if (m[1] === 'default') return unmaskStrings(translateMaskedExpression(v, this.exprCtx()), lits);
+      if (m[1] === 'default') return unmaskStrings(translateMaskedExpression(v, this.exprCtx(lits)), lits);
       const factories: Record<string, string> = { list: 'new ArrayList<>()', dict: 'new HashMap<>()', set: 'new HashSet<>()' };
-      return factories[v] ?? `${unmaskStrings(translateMaskedExpression(v, this.exprCtx()), lits)}() /* default_factory */`;
+      return factories[v] ?? `${unmaskStrings(translateMaskedExpression(v, this.exprCtx(lits)), lits)}() /* default_factory */`;
     }
     return `null /* field(${unmaskStrings(argsText, lits)}) */`;
   }
@@ -1300,6 +1517,7 @@ class RuleTranslation {
       // module level
       const isConst = /^[A-Z][A-Z0-9_]*$/.test(name);
       const t = type === 'var' ? 'Object' : type;
+      if (t !== 'Object') this.scan.moduleTypes.set(name, t);
       this.emit(`${isConst ? 'public static final' : 'static'} ${t} ${name}${rhs};${comment}`, py);
       this.recordSymbol(name, 'field', py);
       return;
@@ -1326,6 +1544,7 @@ class RuleTranslation {
     } else {
       declared.add(name);
       const t = type === 'Object' ? 'var' : type;
+      if (t !== 'var') scope.types?.set(name, t);
       this.emit(`${valueJava === undefined ? (t === 'var' ? 'Object' : t) : t} ${name}${rhs};${comment}`, py);
     }
   }

@@ -10,7 +10,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { JavadocMode, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath } from './translator';
+import { JavadocMode, KnownMembers, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath } from './translator';
+import { knownMembersOf, mergeKnownMembers } from './translator/rules/members';
+import { checkSyntax } from './parser/pythonParser';
 import { splitLogicalLines } from './translator/rules/logicalLines';
 import { isSingleLiteral, maskStrings } from './translator/rules/strings';
 
@@ -240,6 +242,37 @@ export interface MirrorFileOptions {
   javadocMode?: JavadocMode;
   documentTestCode?: boolean;
   lombokStyle?: boolean;
+  /** Project-wide declarations; when omitted, the `members.json` a previous project run left behind is used. */
+  knownMembers?: KnownMembers;
+}
+
+/** Where the project-wide member scan is persisted, relative to the output folder. */
+export const MEMBERS_FILE = `${MAP_DIR}/members.json`;
+
+function readMembersFile(root: string, outputFolder: string): KnownMembers | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(root, outputFolder, MEMBERS_FILE), 'utf8')) as KnownMembers;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Scan every listed file for what it declares and merge the results, so each translation
+ * can see properties, attribute names and typed signatures from the rest of the project.
+ */
+export async function scanProjectMembers(root: string, files: string[], isCancelled?: () => boolean): Promise<KnownMembers> {
+  const parts: KnownMembers[] = [];
+  for (const rel of files) {
+    if (isCancelled?.()) break;
+    await yieldToEventLoop();
+    try {
+      parts.push(knownMembersOf(await fs.promises.readFile(path.join(root, rel), 'utf8')));
+    } catch {
+      // unreadable file: it will be reported when it is translated
+    }
+  }
+  return mergeKnownMembers(parts);
 }
 
 export type MirrorFileOutcome =
@@ -259,15 +292,40 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
   // Earlier versions wrote package modules under other names; drop those so they don't linger next to the current file.
   if (isInitModule(relativePython)) removeLegacyInitViews(root, relativePython, outputFolder);
   let result: TranslateResult;
+  const knownMembers = options.knownMembers ?? readMembersFile(root, outputFolder);
   try {
-    result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
+    result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, knownMembers });
   } catch (err) {
     // Never leave the previous view in place: a reader would take outdated code for current.
     writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name);
     throw err;
   }
+  // A file that does not even parse still gets a view (the rules engine is line-based and
+  // survives), but the reader must know the view is built on broken input.
+  const issues = await checkSyntax(source);
+  if (issues.length) {
+    const shown = issues.slice(0, 5).map((i) => `//   line ${i.line}, column ${i.column + 1}: ${i.message}`);
+    const header = [
+      `// WARNING: ${relativePython} has Python syntax errors; this view may be wrong around them.`,
+      ...shown,
+      ...(issues.length > 5 ? [`//   ... and ${issues.length - 5} more`] : []),
+      '',
+    ];
+    result = prependLines(result, header);
+    result.warnings.push(`${relativePython}:${issues[0].line}: Python syntax error (${issues[0].message}); the Java view is flagged`);
+  }
   const javaAbs = writeView(root, relativePython, outputFolder, result.java, result.sourceMap, result.symbols, result.engine);
   return { skipped: false, javaAbs, result };
+}
+
+/** Put extra lines at the top of a translation, keeping the source map and symbol lines right. */
+function prependLines(result: TranslateResult, lines: string[]): TranslateResult {
+  return {
+    ...result,
+    java: `${lines.join('\n')}\n${result.java}`,
+    sourceMap: [...lines.map(() => 0), ...result.sourceMap],
+    symbols: result.symbols.map((s) => ({ ...s, javaLine: s.javaLine + lines.length })),
+  };
 }
 
 /** Write the Java view and its sidecar map; returns the absolute Java path. */
@@ -354,6 +412,13 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
   const outputFolder = options.outputFolder ?? '.java-view';
   const exclude = options.exclude ?? DEFAULT_EXCLUDES;
   const files = await listPythonFilesAsync(options.root, exclude, options.isCancelled, options.subfolder);
+  const outputRoot = path.join(options.root, outputFolder);
+  // Cross-file knowledge: a full run scans the whole project; a subfolder run refreshes its part on top of the last full scan.
+  const scanned = await scanProjectMembers(options.root, files, options.isCancelled);
+  const previous = options.subfolder ? readMembersFile(options.root, outputFolder) : undefined;
+  const knownMembers = previous ? mergeKnownMembers([previous, scanned]) : scanned;
+  await fs.promises.mkdir(path.join(outputRoot, MAP_DIR), { recursive: true });
+  await fs.promises.writeFile(path.join(outputRoot, MEMBERS_FILE), JSON.stringify(knownMembers), 'utf8');
   const warnings: string[] = [];
   let count = 0;
   let skipped = 0;
@@ -363,7 +428,7 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
     if (options.isCancelled?.()) break;
     options.onProgress?.(rel, index, files.length);
     try {
-      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle });
+      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, knownMembers });
       if (outcome.skipped) {
         skipped += 1;
         continue;
@@ -374,7 +439,6 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
       warnings.push(`${rel}: failed to translate: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const outputRoot = path.join(options.root, outputFolder);
   await fs.promises.mkdir(outputRoot, { recursive: true });
   await fs.promises.writeFile(path.join(outputRoot, 'README.md'), readmeText(outputFolder, translator.name), 'utf8');
   await fs.promises.writeFile(path.join(outputRoot, '.gitignore'), '# Generated by Pyrite - do not commit.\n*\n', 'utf8');
