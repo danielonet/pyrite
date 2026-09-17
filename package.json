@@ -2,7 +2,7 @@
   "name": "pyrite",
   "displayName": "Pyrite",
   "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "danielonnet",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -171,6 +171,12 @@
           "type": "boolean",
           "default": true,
           "description": "Use Lombok-style annotations instead of spelling out boilerplate: a class whose __init__ only assigns its parameters to fields gets @AllArgsConstructor, a trivial __str__/__repr__ becomes @ToString, a trivial __eq__/__hash__ becomes @EqualsAndHashCode, a @property/@x.setter pair that just wraps a field becomes @Getter/@Setter on that field, and a dataclass-like class (@dataclass, NamedTuple, pydantic BaseModel, ...) becomes @Data. Methods that don't match these simple shapes are left spelled out."
+        },
+        "pyrite.lineWidth": {
+          "type": "integer",
+          "default": 120,
+          "minimum": 0,
+          "markdownDescription": "Maximum line length of the generated Java, in columns. Longer lines are wrapped the way IntelliJ IDEA and palantir-java-format do by default.\n\n- A method signature or call that does not fit puts **one parameter per line**, indented 8 spaces.\n- Long conditions break before `&&` and `||`, string concatenation before `+`, and call chains before each `.call()`.\n\nLong string literals are never split. Use **0** to turn wrapping off."
         }
       }
     }

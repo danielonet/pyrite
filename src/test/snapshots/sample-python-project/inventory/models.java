@@ -44,7 +44,8 @@ public final class Models {
                 throw new IllegalArgumentException("quantity must be positive, got " + quantity);
             }
             if (quantity > this.stock) {
-                throw new IllegalArgumentException("not enough stock for " + this.sku + ": wanted " + quantity + ", have " + this.stock);
+                throw new IllegalArgumentException(
+                        "not enough stock for " + this.sku + ": wanted " + quantity + ", have " + this.stock);
             }
             this.stock -= quantity;
         }
@@ -94,7 +95,8 @@ public final class Models {
         }
 
         public String toString() {
-            return "Order #" + this.id + " (" + this.status.name + ") for " + this.customer.name + ": " + String.format("%.2f", this.total());
+            return "Order #" + this.id + " (" + this.status.name + ") for " + this.customer.name + ": "
+                    + String.format("%.2f", this.total());
         }
     }
 

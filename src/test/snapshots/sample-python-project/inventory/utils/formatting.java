@@ -46,7 +46,8 @@ public final class Formatting {
             }
         }
         var line = "+" + String.join("+", widths.stream().map(w -> "-".repeat((w + 2)))) + "+";
-        Function<List<String>, String> render = cells -> "| " + String.join(" | ", Tuple.zip(cells, widths).stream().map((c, w) -> pad(c, w))) + " |";
+        Function<List<String>, String> render = cells -> "| "
+                + String.join(" | ", Tuple.zip(cells, widths).stream().map((c, w) -> pad(c, w))) + " |";
         List<Object> out = List.of(line, render(headers), line);
         out.addAll(rows.stream().map(r -> render(r)));
         out.add(line);

@@ -6,6 +6,27 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-17
+
+### Added
+
+- **Line wrapping to 120 columns.** Generated Java now fits a wide screen,
+  following the IntelliJ IDEA and palantir-java-format defaults: 4-space
+  indentation, 8-space continuation indentation, and "chop down if long".
+  A method signature or call that does not fit puts one parameter per line.
+  Conditions break before `&&` and `||`, arithmetic and string concatenation
+  before the operator, and call chains before each `.call()`. A single call
+  argument stays on the first line with only its own arguments chopped, and
+  `Map.of` keeps each key with its value. Long Javadoc and comment prose is
+  re-flowed. Long string literals, text blocks and URLs are never split.
+- **`pyrite.lineWidth` setting** and `--line-width` CLI option to choose the
+  width. `0` turns wrapping off.
+
+### Fixed
+
+- Python's implicit joining of adjacent string literals (`"a " "b"`) was
+  copied as is, which is not valid Java. It now becomes `"a " + "b"`.
+
 ## [0.2.0] - 2026-09-17
 
 This release adds features and changes what the Java view looks like, hence
@@ -96,6 +117,7 @@ the minor version bump.
 First tagged release. Earlier versions were not tagged, so their changes are
 not listed here.
 
-[Unreleased]: https://github.com/danielonet/pyrite/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/danielonet/pyrite/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/danielonet/pyrite/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/danielonet/pyrite/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/danielonet/pyrite/releases/tag/v0.1.3

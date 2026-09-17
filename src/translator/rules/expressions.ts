@@ -355,7 +355,8 @@ function rewriteExceptionNames(text: string): string {
  * Strings stay as placeholders; the caller unmasks.
  */
 export function translateMaskedExpression(masked: string, ctx: ExprContext = {}): string {
-  let t = masked;
+  // Python joins adjacent string literals ("a " "b"); Java needs an explicit +.
+  let t = masked.replace(new RegExp(`(${PLACEHOLDER_RE})\\s+(?=${PLACEHOLDER_RE})`, 'g'), '$1 + ');
   t = rewriteComprehensions(t);
   t = rewriteLambda(t);
   t = rewriteTernary(t);

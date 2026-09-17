@@ -127,6 +127,7 @@ Use `--dry-run` to build and package without publishing.
 | `pyrite.javadoc` | `docstringOnly` | Javadoc generation: `always` (every class/method, extrapolated when there's no docstring), `docstringOnly` (only where a docstring exists), or `none` (no Javadoc; docstrings kept as plain comments) |
 | `pyrite.javadocTestCode` | `false` | Document test code too, using the same `pyrite.javadoc` rules as production code. When unchecked, test files (`test_*.py`, `*_test.py`, `conftest.py`, or anything under a `test`/`tests` folder) never get Javadoc |
 | `pyrite.lombok` | `true` | Use Lombok-style annotations instead of spelling out boilerplate: a plain `self.x = x` `__init__` becomes `@AllArgsConstructor`, a trivial `__str__`/`__repr__` becomes `@ToString`, a trivial `__eq__`/`__hash__` becomes `@EqualsAndHashCode`, a `@property`/`@x.setter` pair that just wraps a field becomes `@Getter`/`@Setter` on that field, and a dataclass-like class becomes `@Data`. Methods that don't match these simple shapes are left spelled out |
+| `pyrite.lineWidth` | `120` | Maximum line length of the generated Java. Longer lines wrap like IntelliJ IDEA and palantir-java-format by default: a signature or call that does not fit gets one parameter per line with an 8-space continuation indent, conditions break before `&&`/`\|\|`, concatenation before `+`, call chains before each `.call()`. Long string literals are never split. `0` turns wrapping off |
 
 The generated folder contains its own `.gitignore` so it is never committed.
 

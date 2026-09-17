@@ -28,11 +28,14 @@ public final class Main {
      * @param repo the repo
      */
     public static void seed(InMemoryRepository repo) {
-        repo.add_product(new Product(/* sku = */ "P-100", /* name = */ "Keyboard", /* price = */ 49.90, /* stock = */ 10));
+        repo.add_product(
+                new Product(/* sku = */ "P-100", /* name = */ "Keyboard", /* price = */ 49.90, /* stock = */ 10));
         repo.add_product(new Product(/* sku = */ "P-200", /* name = */ "Mouse", /* price = */ 19.50, /* stock = */ 0));
-        repo.add_product(new Product(/* sku = */ "P-300", /* name = */ "Monitor", /* price = */ 249.00, /* stock = */ 3));
+        repo.add_product(
+                new Product(/* sku = */ "P-300", /* name = */ "Monitor", /* price = */ 249.00, /* stock = */ 3));
         repo.add_customer(new Customer(/* id = */ 1, /* name = */ "Ada", /* email = */ "ada@example.com"));
-        repo.add_customer(new Customer(/* id = */ 2, /* name = */ "Linus", /* email = */ "linus@example.com", /* vip = */ true));
+        repo.add_customer(
+                new Customer(/* id = */ 2, /* name = */ "Linus", /* email = */ "linus@example.com", /* vip = */ true));
     }
 
     public static int run(List<String> argv) {
@@ -52,7 +55,10 @@ public final class Main {
         OrderExportJob job = new OrderExportJob(repo, /* chunk_size = */ 2);
         JobResult result = job.run();
 
-        List<Object> rows = repo.orders().stream().map(o -> (o.id, o.status.name, money(o.total(), DEFAULT_CURRENCY))).toList();
+        List<Object> rows = repo.orders()
+                .stream()
+                .map(o -> (o.id, o.status.name, money(o.total(), DEFAULT_CURRENCY)))
+                .toList();
         System.out.println(table(List.of("id", "status", "total"), rows));
         System.out.println("Exported " + result.written + " of " + result.read + " orders, skipped " + result.skipped);
         return result.failed == 0 ? 0 : 1;

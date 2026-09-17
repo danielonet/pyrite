@@ -47,6 +47,7 @@ interface Settings {
   javadoc: JavadocMode;
   javadocTestCode: boolean;
   lombok: boolean;
+  lineWidth: number;
 }
 
 function settings(): Settings {
@@ -59,6 +60,7 @@ function settings(): Settings {
     javadoc: cfg.get<JavadocMode>('javadoc', 'docstringOnly'),
     javadocTestCode: cfg.get<boolean>('javadocTestCode', false),
     lombok: cfg.get<boolean>('lombok', true),
+    lineWidth: cfg.get<number>('lineWidth', 120),
   };
 }
 
@@ -124,6 +126,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
             javadocMode: s.javadoc,
             documentTestCode: s.javadocTestCode,
             lombokStyle: s.lombok,
+            lineWidth: s.lineWidth,
           },
         },
         (rel, i, total) => {
@@ -172,7 +175,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   statusItem.text = '$(sync~spin) Pyrite';
   statusItem.show();
   try {
-    const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok });
+    const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth });
     symbolIndexFor(root, s.outputFolder).invalidatePython(rel);
     if (outcome.skipped) {
       // Only tell the user when they asked for this file explicitly, not on every watched save.

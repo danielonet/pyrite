@@ -100,6 +100,10 @@ test('snapshot: the sample project translates exactly as recorded', async () => 
     };
     collect(path.join(root, '.java-view', 'sample-python-project'));
     assert.ok(produced.length >= 8, `expected the sample project's views, got ${produced.length}`);
+    const tooWide = produced.flatMap((abs) =>
+      fs.readFileSync(abs, 'utf8').split('\n').map((line, i) => ({ line, i })).filter(({ line }) => line.length > 120).map(({ line, i }) => `${path.basename(abs)}:${i + 1}: ${line.length} columns`),
+    );
+    assert.deepEqual(tooWide, [], 'the sample project must fit in 120 columns');
 
     const update = Boolean(process.env.UPDATE_SNAPSHOTS);
     const mismatches: string[] = [];
@@ -165,6 +169,8 @@ test(`corpus: the rules engine survives real-world Python (${CORPUS[0] ?? 'no co
   const slow: string[] = [];
   const missing: string[] = [];
   let checkedDefinitions = 0;
+  let totalLines = 0;
+  let overWidth = 0;
   let parserAvailable = true;
   for (const abs of selected) {
     const source = fs.readFileSync(abs, 'utf8');
@@ -179,6 +185,9 @@ test(`corpus: the rules engine survives real-world Python (${CORPUS[0] ?? 'no co
     }
     const ms = Date.now() - started;
     if (ms > 3000) slow.push(`${rel}: ${ms} ms`);
+    const javaLines = result.java.split('\n');
+    totalLines += javaLines.length;
+    overWidth += javaLines.filter((l) => l.length > 120).length;
     const balance = braceBalance(result.java);
     if (balance !== 0) unbalanced.push(`${rel}: ${balance > 0 ? `${balance} unclosed` : `${-balance} extra closing`}`);
 
@@ -201,6 +210,7 @@ test(`corpus: the rules engine survives real-world Python (${CORPUS[0] ?? 'no co
     }
   }
   t.diagnostic(`corpus: ${selected.length} of ${files.length} files, ${checkedDefinitions} definitions cross-checked${parserAvailable ? '' : ' (tree-sitter unavailable: oracle skipped)'}`);
+  t.diagnostic(`corpus: ${overWidth} of ${totalLines} generated lines exceed 120 columns (long string literals, text blocks and URLs cannot be wrapped)`);
   assert.deepEqual(threw, [], `translator threw:\n${threw.join('\n')}`);
   assert.deepEqual(unbalanced, [], `unbalanced braces:\n${unbalanced.join('\n')}`);
   assert.deepEqual(slow, [], `slow files:\n${slow.join('\n')}`);

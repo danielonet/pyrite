@@ -21,11 +21,12 @@ interface Args {
   javadoc: JavadocMode;
   javadocTestCode: boolean;
   lombok: boolean;
+  lineWidth: number;
   quiet: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { out: '.java-view', engine: 'rules', javadoc: 'docstringOnly', javadocTestCode: false, lombok: true, quiet: false };
+  const args: Args = { out: '.java-view', engine: 'rules', javadoc: 'docstringOnly', javadocTestCode: false, lombok: true, lineWidth: 120, quiet: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -41,6 +42,14 @@ function parseArgs(argv: string[]): Args {
     } else if (a === '--javadoc-test-code') args.javadocTestCode = true;
     else if (a === '--lombok') args.lombok = true;
     else if (a === '--no-lombok') args.lombok = false;
+    else if (a === '--line-width') {
+      const n = Number(argv[++i]);
+      if (!Number.isInteger(n) || n < 0) {
+        console.error('--line-width needs a whole number of columns (0 turns wrapping off)');
+        process.exit(2);
+      }
+      args.lineWidth = n;
+    }
     else if (a === '--quiet' || a === '-q') args.quiet = true;
     else if (a === '--help' || a === '-h') {
       printUsage();
@@ -57,11 +66,12 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--quiet]
-  pyrite --file <module.py> [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok]
+  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--quiet]
+  pyrite --file <module.py> [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120]
 
   --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).
-  --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).`);
+  --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).
+  --line-width <n>      Wrap generated lines longer than n columns (default: 120, 0 = no wrapping).`);
 }
 
 async function main(): Promise<void> {
@@ -72,7 +82,7 @@ async function main(): Promise<void> {
   if (args.file) {
     const abs = path.resolve(args.file);
     const source = fs.readFileSync(abs, 'utf8');
-    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode, lombokStyle: args.lombok });
+    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode, lombokStyle: args.lombok, lineWidth: args.lineWidth });
     process.stdout.write(result.java);
     for (const w of result.warnings) console.error(`warning: ${w}`);
     return;
@@ -94,6 +104,7 @@ async function main(): Promise<void> {
     javadocMode: args.javadoc,
     documentTestCode: args.javadocTestCode,
     lombokStyle: args.lombok,
+    lineWidth: args.lineWidth,
     onProgress: (rel, i, total) => {
       if (!args.quiet) console.error(`[${i + 1}/${total}] ${rel}`);
     },

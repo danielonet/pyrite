@@ -49,6 +49,12 @@ export interface TranslateInput {
    * other modules get a type. Built by `mirrorProject`; this file's own declarations win.
    */
   knownMembers?: KnownMembers;
+  /**
+   * Maximum line length of the generated Java, in columns. Longer lines are wrapped:
+   * arguments and parameters one per line with an 8-space continuation indent, breaks
+   * before `&&`, `||`, `?`, `+` and chained calls. 0 disables wrapping. Defaults to 120.
+   */
+  lineWidth?: number;
 }
 
 export type SymbolKind = 'class' | 'method' | 'field';

@@ -23,6 +23,7 @@ import { ExprContext, indexAtDepth0, mapExceptionName, setFStringExpressionConte
 import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, isInitModule, moduleClassName, packageFromPath, toPascalCase } from '../types';
 import { FieldInfo, KnownMembers, MemberScan, classNameOf, collectSelfFields, elementTypeOf, inferTypeFromMaskedValue, mapTypesOf, scanMembers, toKnownMembers, typeFromDefault } from './members';
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
+import { DEFAULT_LINE_WIDTH, formatJavaLine } from './layout';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
 
@@ -568,13 +569,20 @@ class RuleTranslation {
 
     // Trim trailing blank lines from body
     while (this.out.length && this.out[this.out.length - 1].text === '') this.out.pop();
-    const all = [...header, ...this.out, { text: '}', py: 0 }, { text: '', py: 0 }];
-    // An emitted statement can span several physical lines (text blocks), so the source map
-    // and the symbols' line numbers are built from physical lines, not from emitted entries.
+    // Wrap long body lines to the configured width. `lead` counts lines (a moved comment)
+    // placed above the statement itself, so symbols still point at their declaration.
+    const width = this.input.lineWidth ?? DEFAULT_LINE_WIDTH;
+    const body = this.out.map((l) => {
+      const f = formatJavaLine(l.text, width);
+      return { text: f.text, py: l.py, lead: f.lead };
+    });
+    const all: (OutLine & { lead?: number })[] = [...header, ...body, { text: '}', py: 0 }, { text: '', py: 0 }];
+    // An emitted statement can span several physical lines (wrapped lines, text blocks), so the
+    // source map and the symbols' line numbers are built from physical lines, not emitted entries.
     const sourceMap: number[] = [];
     const physicalLineOf: number[] = [];
     for (const l of all) {
-      physicalLineOf.push(sourceMap.length);
+      physicalLineOf.push(sourceMap.length + (l.lead ?? 0));
       const count = l.text.split('\n').length;
       for (let k = 0; k < count; k += 1) sourceMap.push(l.py);
     }

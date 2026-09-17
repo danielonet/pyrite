@@ -34,6 +34,8 @@ export interface MirrorOptions {
   documentTestCode?: boolean;
   /** Render idiomatic Lombok-style Java instead of boilerplate (default false). See `TranslateInput.lombokStyle`. */
   lombokStyle?: boolean;
+  /** Maximum line length of the generated Java; 0 disables wrapping (default 120). See `TranslateInput.lineWidth`. */
+  lineWidth?: number;
   /** Progress callback: called once per file with the relative path and index. */
   onProgress?: (relativePath: string, index: number, total: number) => void;
   /** Cooperative cancellation. */
@@ -242,6 +244,7 @@ export interface MirrorFileOptions {
   javadocMode?: JavadocMode;
   documentTestCode?: boolean;
   lombokStyle?: boolean;
+  lineWidth?: number;
   /** Project-wide declarations; when omitted, the `members.json` a previous project run left behind is used. */
   knownMembers?: KnownMembers;
 }
@@ -294,7 +297,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
   let result: TranslateResult;
   const knownMembers = options.knownMembers ?? readMembersFile(root, outputFolder);
   try {
-    result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, knownMembers });
+    result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, knownMembers });
   } catch (err) {
     // Never leave the previous view in place: a reader would take outdated code for current.
     writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name);
@@ -428,7 +431,7 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
     if (options.isCancelled?.()) break;
     options.onProgress?.(rel, index, files.length);
     try {
-      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, knownMembers });
+      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, knownMembers });
       if (outcome.skipped) {
         skipped += 1;
         continue;

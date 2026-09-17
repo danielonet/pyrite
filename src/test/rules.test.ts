@@ -971,7 +971,15 @@ FLAGS = [  # leading
     2,  # two
 ]
 `);
-  contains(out, '// main\n    // Hack: no conversion for these\n    public static final Map<String, Object> CODEC_MAP = Map.of("gb2312", "eucgb2312_cn", "big5", "big5_tw", "hash", "#notacomment");');
+  const unwrapped = translateWithRules({ source: out === '' ? '' : `
+CODEC_MAP = {
+    "gb2312": "eucgb2312_cn",  # main
+    # Hack: no conversion for these
+    "big5": "big5_tw",
+    "hash": "#notacomment",
+}
+`, relativePath: 'pkg/mod.py', lineWidth: 0 }).java;
+  contains(unwrapped, '// main\n    // Hack: no conversion for these\n    public static final Map<String, Object> CODEC_MAP = Map.of("gb2312", "eucgb2312_cn", "big5", "big5_tw", "hash", "#notacomment");');
   contains(out, '// leading\n    // two\n    public static final List<Object> FLAGS = List.of(1, 2);');
   assertBracesBalanced(out);
 });
@@ -980,7 +988,7 @@ test('regression: a huge literal without a comprehension translates quickly', ()
   const entries = Array.from({ length: 1500 }, (_, i) => `    'key_${i}': 'value_${i}',`).join('\n');
   const started = Date.now();
   const out = java(`TABLE = {\n${entries}\n}\n`);
-  contains(out, 'public static final Map<String, Object> TABLE = Map.of("key_0", "value_0",');
+  contains(out, 'public static final Map<String, Object> TABLE = Map.of(\n            "key_0", "value_0",\n            "key_1", "value_1",');
   assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
 });
 
@@ -1075,4 +1083,152 @@ def first[T](items: list[T], /) -> T:
   contains(out, 'public static class Pair<K, V extends Comparable> {');
   contains(out, 'public static <T> T first(List<T> items) {');
   contains(out, 'T get();');
+});
+
+// ------------------------------------------------------------------ line width
+
+function maxLineLength(out: string): number {
+  return Math.max(...out.split('\n').map((l) => l.length));
+}
+
+test('layout: a signature that does not fit puts one parameter per line with an 8-space continuation', () => {
+  const result = translateWithRules({
+    source: `
+class Job:
+    def configure(self, reader: ItemReader, processor: ItemProcessor, writer: ItemWriter, chunk_size: int = 10, skip_limit: int = 3, retry_limit: int = 2, name: str = "job"):
+        pass
+
+    def short(self, a: int, b: int) -> int:
+        return a + b
+`,
+    relativePath: 'pkg/mod.py',
+  });
+  const out = result.java;
+  contains(
+    out,
+    [
+      '        public void configure(',
+      '                ItemReader reader,',
+      '                ItemProcessor processor,',
+      '                ItemWriter writer,',
+      '                int chunk_size /* = 10 */,',
+      '                int skip_limit /* = 3 */,',
+      '                int retry_limit /* = 2 */,',
+      '                String name /* = "job" */) {',
+      '            // pass',
+    ].join('\n'),
+  );
+  // A signature that fits stays on one line.
+  contains(out, '        public int short(int a, int b) {');
+  assert.ok(maxLineLength(out) <= 120);
+  // Go to Definition and the source map still point at the declaration.
+  const lines = out.split('\n');
+  const configure = result.symbols.find((s) => s.name === 'configure')!;
+  assert.match(lines[configure.javaLine], /public void configure\($/);
+  assert.equal(result.sourceMap.length, lines.length);
+  assert.equal(result.sourceMap[lines.indexOf('                ItemWriter writer,')], 3);
+});
+
+test('layout: calls chop down, a single call argument hugs, Map.of keeps pairs together', () => {
+  const out = java(`
+def build(repo, product, quantity, customer):
+    repo.save(Order(customer=customer, product=product, quantity=quantity, unit_price=product.price, note="created by the nightly import job"))
+    return {"orders": repo.count_orders_for(customer), "revenue": repo.revenue_for(customer), "average": repo.average_for(customer)}
+`);
+  contains(
+    out,
+    [
+      '        repo.save(new Order(',
+      '                /* customer = */ customer,',
+      '                /* product = */ product,',
+      '                /* quantity = */ quantity,',
+      '                /* unit_price = */ product.price,',
+      '                /* note = */ "created by the nightly import job"));',
+    ].join('\n'),
+  );
+  contains(
+    out,
+    [
+      '        return Map.of(',
+      '                "orders", repo.count_orders_for(customer),',
+      '                "revenue", repo.revenue_for(customer),',
+      '                "average", repo.average_for(customer));',
+    ].join('\n'),
+  );
+  assert.ok(maxLineLength(out) <= 120);
+});
+
+test('layout: conditions break before && and ||, concatenation before +, chains before each call', () => {
+  const out = java(`
+def check(order, customer, items):
+    if order.status == "NEW" and customer.is_active_member_of_the_loyalty_program and len(items) < MAXIMUM_ITEMS_PER_ORDER:
+        raise ValueError("order " + str(order.id) + " for customer " + customer.name + " cannot be placed because the basket is too big")
+    return [line.product.sku.upper() for line in order.lines if line.quantity > 0 and line.product.sku is not None and line.product.active]
+`);
+  contains(
+    out,
+    [
+      '        if (order.status == "NEW"',
+      '                && customer.is_active_member_of_the_loyalty_program',
+      '                && items.size() < MAXIMUM_ITEMS_PER_ORDER) {',
+    ].join('\n'),
+  );
+  contains(out, '            throw new IllegalArgumentException(\n                    "order " + String.valueOf(order.id)');
+  // The chain breaks before each call that follows a call; `order.lines.stream()` stays together.
+  contains(out, '        return order.lines.stream()\n                .filter(line -> line.quantity > 0 && line.product.sku != null && line.product.active)\n                .map(');
+  assert.ok(maxLineLength(out) <= 120, out);
+});
+
+test('layout: a trailing comment that makes a line too long moves above it, or into the block it opens', () => {
+  const result = translateWithRules({
+    source: `
+class Account:
+    def __init__(self, owner):
+        self.owner_display_name_for_statements_and_reports = owner.first_name + owner.last_name  # shown on every monthly statement
+`,
+    relativePath: 'pkg/mod.py',
+  });
+  const out = result.java;
+  contains(out, '            // shown on every monthly statement\n            this.owner_display_name_for_statements_and_reports = owner.first_name + owner.last_name;');
+  const lines = out.split('\n');
+  const field = result.symbols.find((s) => s.name === 'owner_display_name_for_statements_and_reports')!;
+  assert.match(lines[field.javaLine], /public Object owner_display_name_for_statements_and_reports;|owner_display_name_for_statements_and_reports; \/\//);
+  assert.ok(maxLineLength(out) <= 120, out);
+});
+
+test('layout: strings, comments and generics are never split, and long string literals are left alone', () => {
+  const longText = 'x'.repeat(130);
+  const out = java(`
+def f(mapping: Dict[str, List[int]], other: Dict[str, List[int]], third: Dict[str, List[int]], fourth: Dict[str, int]):
+    print("a, b, c // not a comment", mapping, other, third, fourth, "and some more text to overflow the line")
+    message = "${longText}"
+`);
+  contains(out, '    public static void f(\n            Map<String, List<Integer>> mapping,\n            Map<String, List<Integer>> other,');
+  contains(out, '"a, b, c // not a comment",');
+  contains(out, `String message = "${longText}";`);
+});
+
+test('layout: Javadoc and comment prose re-flow to the width; a single overlong word is kept whole', () => {
+  const doc = 'This method reconciles every open order against the warehouse stock levels and reports each mismatch it finds along the way to the audit log.';
+  const url = `https://example.com/${'a'.repeat(120)}`;
+  const out = java(['def reconcile():', `    """${doc}`, '', `    See ${url}`, '    """', '    # a plain comment that is also far too long to fit on one line of the generated Java view, so it has to be re-flowed onto a second line', '    pass', ''].join('\n'));
+  contains(out, '     * This method reconciles every open order against the warehouse stock levels and reports each mismatch it finds\n     * along the way to the audit log.');
+  contains(out, `     * See\n     * ${url}`);
+  contains(out, '        // a plain comment that is also far too long to fit on one line of the generated Java view, so it has to be\n        // re-flowed onto a second line');
+});
+
+test('layout: lineWidth 0 turns wrapping off, and a narrower width is honoured', () => {
+  const source = 'def f(alpha_value, beta_value, gamma_value, delta_value, epsilon_value, zeta_value, eta_value, theta_value):\n    pass\n';
+  const off = translateWithRules({ source, relativePath: 'pkg/mod.py', lineWidth: 0 }).java;
+  contains(off, 'public static void f(Object alpha_value, Object beta_value, Object gamma_value, Object delta_value, Object epsilon_value, Object zeta_value, Object eta_value, Object theta_value) {');
+  const narrow = translateWithRules({ source: 'def f(alpha_value, beta_value, gamma_value):\n    pass\n', relativePath: 'pkg/mod.py', lineWidth: 60 }).java;
+  contains(narrow, '    public static void f(\n            Object alpha_value,\n            Object beta_value,\n            Object gamma_value) {');
+  // The fixed two-line file header is not wrapped; everything in the class body is.
+  assert.ok(maxLineLength(narrow.slice(narrow.indexOf('public final class'))) <= 60, narrow);
+});
+
+test('Python adjacent string literals are joined with +', () => {
+  assert.equal(translateExpression('"a " "b" \'c\''), '"a " + "b" + "c"');
+  const out = java('raise ValueError("first part of the message " "second part")\n');
+  contains(out, 'throw new IllegalArgumentException("first part of the message " + "second part");');
 });

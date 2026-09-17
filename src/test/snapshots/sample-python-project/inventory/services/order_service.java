@@ -62,7 +62,10 @@ public final class OrderService {
                     throw new IllegalArgumentException(product.name + " is out of stock");
                 }
                 product.reserve(quantity);
-                order.lines.add(new OrderLine(/* product = */ product, /* quantity = */ quantity, /* unit_price = */ product.price));
+                order.lines.add(new OrderLine(
+                        /* product = */ product,
+                        /* quantity = */ quantity,
+                        /* unit_price = */ product.price));
             }
 
             this.placed += 1;
@@ -73,7 +76,8 @@ public final class OrderService {
         public Order pay(int order_id) {
             Order order = this._require(order_id);
             if (order.status != OrderStatus.NEW) {
-                throw new IllegalArgumentException("order " + order_id + " cannot be paid in status " + order.status.name);
+                throw new IllegalArgumentException(
+                        "order " + order_id + " cannot be paid in status " + order.status.name);
             }
             order.status = OrderStatus.PAID;
             return order;
@@ -98,9 +102,21 @@ public final class OrderService {
         }
 
         public Map<String, Double> summary() {
-            Map<String, Object> totals = this.repo.orders().stream().collect(Collectors.toMap(o -> o.id, o -> o.total()));
-            List<Object> paid = totals.entrySet().stream().filter((oid, t) -> this.repo.order(oid).status == OrderStatus.PAID).map((oid, t) -> t).toList();
-            return Map.of("orders", (double) (len(totals)), "revenue", Math.round((paid.stream().mapToDouble(Number::doubleValue).sum()) * 100.0) / 100.0, "average", paid ? Math.round((paid.stream().mapToDouble(Number::doubleValue).sum() / paid.size()) * 100.0) / 100.0 : 0.0);
+            Map<String, Object> totals = this.repo.orders()
+                    .stream()
+                    .collect(Collectors.toMap(o -> o.id, o -> o.total()));
+            List<Object> paid = totals.entrySet()
+                    .stream()
+                    .filter((oid, t) -> this.repo.order(oid).status == OrderStatus.PAID)
+                    .map((oid, t) -> t)
+                    .toList();
+            return Map.of(
+                    "orders", (double) (len(totals)),
+                    "revenue", Math.round((paid.stream().mapToDouble(Number::doubleValue).sum()) * 100.0) / 100.0,
+                    "average", paid
+                            ? Math.round((paid.stream().mapToDouble(Number::doubleValue).sum() / paid.size()) * 100.0)
+                                    / 100.0
+                            : 0.0);
         }
 
         protected Order _require(int order_id) {

@@ -90,7 +90,12 @@ public final class Job {
                 return null;
             }
             var skus = String.join(";", item.skus().stream().sorted().toList());
-            return List.of(String.valueOf(item.id), item.customer.email, item.status.name, String.format("%.2f", item.total()), skus);
+            return List.of(
+                    String.valueOf(item.id),
+                    item.customer.email,
+                    item.status.name,
+                    String.format("%.2f", item.total()),
+                    skus);
         }
     }
 
@@ -125,7 +130,12 @@ public final class Job {
         public int chunk_size; // assigned as self.chunk_size in __init__()
         public int skip_limit; // assigned as self.skip_limit in __init__()
 
-        public ChunkedJob(ItemReader<I> reader, ItemProcessor<I, O> processor, ItemWriter<O> writer, int chunk_size /* = 10 */, int skip_limit /* = 3 */) {
+        public ChunkedJob(
+                ItemReader<I> reader,
+                ItemProcessor<I, O> processor,
+                ItemWriter<O> writer,
+                int chunk_size /* = 10 */,
+                int skip_limit /* = 3 */) {
             this.reader = reader;
             this.processor = processor;
             this.writer = writer;
