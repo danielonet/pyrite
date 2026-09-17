@@ -20,11 +20,16 @@ import * as vscode from 'vscode';
 import { createTranslator, EngineName, JavadocMode, Translator } from './translator';
 import { javaLineFor, javaPathFor, mirrorFile, pythonLineFor, readSourceMap, removeMirroredFile, removeMirroredFolder, isExcluded } from './mirror';
 import { runMirrorInBackground } from './backgroundMirror';
-import { SymbolIndexCache, resolveDefinition } from './definitionIndex';
+import { SymbolIndexCache, ViewStats, resolveDefinition } from './definitionIndex';
 import { PyriteAboutViewProvider } from './aboutView';
 
 let output: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
+
+/** Status bar label: the logo alone, from the extension's own icon font (contributed in package.json). */
+const STATUS_IDLE = '$(pyrite-logo)';
+/** Same place while a translation is running, with the built-in spinner. */
+const STATUS_BUSY = '$(sync~spin)';
 
 /** One symbol index per workspace folder + output folder, kept warm between "Go to Definition" calls. */
 const symbolIndexes = new Map<string, SymbolIndexCache>();
@@ -147,6 +152,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
       } finally {
         cancelListener.dispose();
         symbolIndexFor(root, s.outputFolder).invalidateAll();
+        void refreshStatusReport(root.uri);
       }
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       output.appendLine(`Generated ${summary.files} file(s) in ${summary.outputRoot} (${summary.engine} engine, ${secs}s${summary.skipped ? `, ${summary.skipped} package-marker __init__.py skipped` : ''}).`);
@@ -172,11 +178,12 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   const rel = relPath(root, pyUri.fsPath);
   if (isExcluded(rel, s.exclude)) return undefined;
   const translator = buildTranslator();
-  statusItem.text = '$(sync~spin) Pyrite';
+  statusItem.text = STATUS_BUSY;
   statusItem.show();
   try {
     const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth });
     symbolIndexFor(root, s.outputFolder).invalidatePython(rel);
+    void refreshStatusReport(pyUri);
     if (outcome.skipped) {
       // Only tell the user when they asked for this file explicitly, not on every watched save.
       if (!quiet) void vscode.window.showInformationMessage(`Pyrite: ${rel} only marks a Python package (Java packages are plain folders), so it has no Java view.`);
@@ -195,7 +202,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
     void vscode.window.showErrorMessage(`Pyrite: failed to translate ${rel}: ${msg}`);
     return undefined;
   } finally {
-    statusItem.text = '$(file-code) Pyrite';
+    statusItem.text = STATUS_IDLE;
   }
 }
 
@@ -281,16 +288,87 @@ async function clearView(): Promise<void> {
   if (pick !== 'Delete') return;
   fs.rmSync(out, { recursive: true, force: true });
   symbolIndexFor(root, s.outputFolder).invalidateAll();
+  void refreshStatusReport(root.uri);
   void vscode.window.showInformationMessage(`Pyrite: deleted ${s.outputFolder}/.`);
+}
+
+/** How long ago, in words, for the tooltip's footer. */
+function timeAgo(when: Date): string {
+  const seconds = Math.max(0, Math.round((Date.now() - when.getTime()) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+function count(n: number, singular: string, plural = `${singular}s`): string {
+  return `${n.toLocaleString()} ${n === 1 ? singular : plural}`;
+}
+
+/** The status bar tooltip: what the Java view contains and what went wrong, as Markdown. */
+export function buildStatusReport(stats: ViewStats, outputFolder: string): vscode.MarkdownString {
+  const md = new vscode.MarkdownString();
+  md.supportThemeIcons = true;
+  // Command links are what a tooltip has instead of buttons; only Pyrite's own commands are trusted.
+  md.isTrusted = { enabledCommands: ['pyrite.generateView', 'pyrite.clearView'] };
+  md.appendMarkdown('**Pyrite — Java view**\n\n');
+  if (stats.files === 0) {
+    md.appendMarkdown(`No Java view in \`${outputFolder}/\` yet.`);
+    appendActions(md, false);
+    return md;
+  }
+  md.appendMarkdown(`$(file-code) ${count(stats.files, 'file')} translated to \`${outputFolder}/\`\n\n`);
+  // The declaration counts are their own group, fenced by rules. Headings enlarge the text and,
+  // since a hover renders codicons at the inherited font size, the icons with it.
+  md.appendMarkdown('---\n\n');
+  md.appendMarkdown(`### $(symbol-class) ${count(stats.classes, 'class', 'classes')}\n\n`);
+  md.appendMarkdown(`### $(symbol-method) ${count(stats.methods, 'method')}\n\n`);
+  md.appendMarkdown(`### $(symbol-field) ${count(stats.fields, 'field')}\n\n`);
+  md.appendMarkdown('---\n\n');
+  const problems: string[] = [];
+  if (stats.failed) problems.push(`$(error) ${count(stats.failed, 'file')} failed to translate`);
+  if (stats.syntaxErrors) problems.push(`$(warning) ${count(stats.syntaxErrors, 'file')} with Python syntax errors`);
+  if (stats.warnings) problems.push(`$(info) ${count(stats.warnings, 'warning')}`);
+  md.appendMarkdown(problems.length ? `${problems.join('\n\n')}\n\n` : '$(check) No errors or warnings\n\n');
+  if (stats.lastGenerated) md.appendMarkdown(`Last updated ${timeAgo(stats.lastGenerated)}.`);
+  appendActions(md, stats.files > 0);
+  return md;
+}
+
+/** The tooltip's action row: command links, which render as buttons in a hover. */
+function appendActions(md: vscode.MarkdownString, hasView: boolean): void {
+  md.appendMarkdown('\n\n---\n\n');
+  const generate = `[$(play) ${hasView ? 'Regenerate Java view' : 'Generate Java view'}](command:pyrite.generateView)`;
+  md.appendMarkdown(hasView ? `${generate} &nbsp;&nbsp; [$(trash) Delete view](command:pyrite.clearView)` : generate);
+}
+
+/** Recompute the status bar tooltip from the sidecar maps of the active workspace folder. */
+async function refreshStatusReport(uri?: vscode.Uri): Promise<void> {
+  const root = rootFor(uri);
+  if (!root || !statusItem) return;
+  const s = settings();
+  try {
+    const stats = await symbolIndexFor(root, s.outputFolder).stats();
+    statusItem.tooltip = buildStatusReport(stats, s.outputFolder);
+  } catch {
+    statusItem.tooltip = new vscode.MarkdownString('**Pyrite**\n\nClick to generate the Java view of this workspace.');
+  }
 }
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('Pyrite');
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
-  statusItem.text = '$(file-code) Pyrite';
-  statusItem.tooltip = 'Pyrite: generate the Java view of this workspace';
+  statusItem.text = STATUS_IDLE;
+  // The label is the logo alone; screen readers and the status bar menu still need a name.
+  statusItem.name = 'Pyrite';
+  statusItem.accessibilityInformation = { label: 'Pyrite: Java view' };
   statusItem.command = 'pyrite.generateView';
+  statusItem.tooltip = new vscode.MarkdownString('**Pyrite**\n\nReading the generated Java view...');
   statusItem.show();
+  void refreshStatusReport();
 
   context.subscriptions.push(
     output,
@@ -343,6 +421,7 @@ export function activate(context: vscode.ExtensionContext): void {
         removeMirroredFolder(root.uri.fsPath, rel, s.outputFolder);
         symbolIndexFor(root, s.outputFolder).invalidateAll();
       }
+      void refreshStatusReport(uri);
     }),
   );
 
@@ -355,6 +434,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
   context.subscriptions.push(mapWatcher, mapWatcher.onDidChange(onMapChange), mapWatcher.onDidCreate(onMapChange), mapWatcher.onDidDelete(onMapChange));
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor((editor) => void refreshStatusReport(editor?.document.uri)),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('pyrite')) void refreshStatusReport();
+    }),
+  );
 }
 
 export function deactivate(): void {

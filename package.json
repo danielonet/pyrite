@@ -32,6 +32,15 @@
     "pyrite": "./out/cli.js"
   },
   "contributes": {
+    "icons": {
+      "pyrite-logo": {
+        "description": "Pyrite logo",
+        "default": {
+          "fontPath": "media/pyrite-icons.woff",
+          "fontCharacter": "\\E001"
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -187,6 +196,7 @@
     "test": "npm run compile && node --test \"out/test/**/*.test.js\"",
     "cli": "node out/cli.js",
     "package": "vsce package",
+    "build:icon-font": "node scripts/build-icon-font.js",
     "install:local": "bash scripts/build-and-install.sh",
     "uninstall:local": "bash scripts/uninstall.sh",
     "publish:marketplace": "bash scripts/publish-marketplace.sh"
@@ -194,6 +204,10 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.90.0",
+    "svg2ttf": "^6.1.0",
+    "svgicons2svgfont": "^15.0.1",
+    "svgpath": "^2.6.0",
+    "ttf2woff": "^3.0.0",
     "typescript": "^5.5.0"
   },
   "dependencies": {

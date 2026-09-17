@@ -1232,3 +1232,28 @@ test('Python adjacent string literals are joined with +', () => {
   const out = java('raise ValueError("first part of the message " "second part")\n');
   contains(out, 'throw new IllegalArgumentException("first part of the message " + "second part");');
 });
+
+test('each sidecar map records how its translation went, for the status bar report', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-status-'));
+  try {
+    fs.mkdirSync(path.join(root, 'pkg'));
+    fs.writeFileSync(path.join(root, 'pkg', 'ok.py'), 'class A:\n    def f(self):\n        return 1\n', 'utf8');
+    fs.writeFileSync(path.join(root, 'pkg', 'bad.py'), 'def broken(:\n    pass\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    const readMap = (name: string) => JSON.parse(fs.readFileSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', `${name}.java.json`), 'utf8'));
+
+    await mirrorFile(translator, root, 'pkg/ok.py');
+    assert.equal(readMap('ok').status, 'ok');
+    assert.equal(readMap('ok').warnings, 0);
+
+    await mirrorFile(translator, root, 'pkg/bad.py');
+    assert.equal(readMap('bad').status, 'syntax');
+    assert.ok(readMap('bad').warnings >= 1);
+
+    const broken: Translator = { name: 'rules', translate: async () => { throw new Error('boom'); } };
+    await assert.rejects(mirrorFile(broken, root, 'pkg/ok.py'));
+    assert.equal(readMap('ok').status, 'failed');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

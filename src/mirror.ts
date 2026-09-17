@@ -65,7 +65,13 @@ export interface SourceMapFile {
   lines: number[];
   /** Classes, methods and fields declared in this file, for cross-file "Go to Definition". */
   symbols: SymbolInfo[];
+  /** How the translation went: a clean view, one flagged for Python syntax errors, or a failure placeholder. */
+  status?: ViewStatus;
+  /** Number of warnings the translator reported for this file. */
+  warnings?: number;
 }
+
+export type ViewStatus = 'ok' | 'syntax' | 'failed';
 
 export const DEFAULT_EXCLUDES = [
   '**/node_modules/**',
@@ -249,8 +255,11 @@ export interface MirrorFileOptions {
   knownMembers?: KnownMembers;
 }
 
+/** File name of the project-wide member scan, which sits beside the per-file maps but is not one. */
+export const MEMBERS_FILE_NAME = 'members.json';
+
 /** Where the project-wide member scan is persisted, relative to the output folder. */
-export const MEMBERS_FILE = `${MAP_DIR}/members.json`;
+export const MEMBERS_FILE = `${MAP_DIR}/${MEMBERS_FILE_NAME}`;
 
 function readMembersFile(root: string, outputFolder: string): KnownMembers | undefined {
   try {
@@ -300,7 +309,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, knownMembers });
   } catch (err) {
     // Never leave the previous view in place: a reader would take outdated code for current.
-    writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name);
+    writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name, 'failed', 1);
     throw err;
   }
   // A file that does not even parse still gets a view (the rules engine is line-based and
@@ -317,7 +326,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     result = prependLines(result, header);
     result.warnings.push(`${relativePython}:${issues[0].line}: Python syntax error (${issues[0].message}); the Java view is flagged`);
   }
-  const javaAbs = writeView(root, relativePython, outputFolder, result.java, result.sourceMap, result.symbols, result.engine);
+  const javaAbs = writeView(root, relativePython, outputFolder, result.java, result.sourceMap, result.symbols, result.engine, issues.length ? 'syntax' : 'ok', result.warnings.length);
   return { skipped: false, javaAbs, result };
 }
 
@@ -332,13 +341,23 @@ function prependLines(result: TranslateResult, lines: string[]): TranslateResult
 }
 
 /** Write the Java view and its sidecar map; returns the absolute Java path. */
-function writeView(root: string, relativePython: string, outputFolder: string, java: string, lines: number[], symbols: SymbolInfo[], engine: string): string {
+function writeView(
+  root: string,
+  relativePython: string,
+  outputFolder: string,
+  java: string,
+  lines: number[],
+  symbols: SymbolInfo[],
+  engine: string,
+  status: ViewStatus = 'ok',
+  warnings = 0,
+): string {
   const outRoot = path.join(root, outputFolder);
   const javaRel = javaPathFor(relativePython);
   const javaAbs = path.join(outRoot, javaRel);
   fs.mkdirSync(path.dirname(javaAbs), { recursive: true });
   fs.writeFileSync(javaAbs, java, 'utf8');
-  const map: SourceMapFile = { python: relativePython, java: `${outputFolder}/${javaRel}`, engine, generatedAt: new Date().toISOString(), lines, symbols };
+  const map: SourceMapFile = { python: relativePython, java: `${outputFolder}/${javaRel}`, engine, generatedAt: new Date().toISOString(), lines, symbols, status, warnings };
   const mapAbs = path.join(outRoot, mapPathFor(relativePython));
   fs.mkdirSync(path.dirname(mapAbs), { recursive: true });
   fs.writeFileSync(mapAbs, JSON.stringify(map), 'utf8');

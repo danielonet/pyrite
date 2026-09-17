@@ -155,3 +155,92 @@ test('SymbolIndexCache does not cache a build that raced with a change', async (
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('SymbolIndexCache.stats reports files, declarations and errors for the status bar', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-stats-'));
+  try {
+    writeMap(root, '.java-view', {
+      python: 'models.py',
+      java: '.java-view/models.java',
+      engine: 'rules',
+      generatedAt: '2026-09-17T10:00:00.000Z',
+      lines: [],
+      status: 'ok',
+      warnings: 0,
+      symbols: [
+        // The per-module wrapper class (container []) is not a Python class.
+        { name: 'Models', kind: 'class', container: [], javaLine: 5, pythonLine: 1 },
+        { name: 'Order', kind: 'class', container: ['Models'], javaLine: 8, pythonLine: 3 },
+        { name: 'total', kind: 'method', container: ['Models', 'Order'], javaLine: 12, pythonLine: 6 },
+        { name: 'id', kind: 'field', container: ['Models', 'Order'], javaLine: 10, pythonLine: 4 },
+      ],
+    });
+    writeMap(root, '.java-view', {
+      python: 'broken.py',
+      java: '.java-view/broken.java',
+      engine: 'rules',
+      generatedAt: '2026-09-17T11:00:00.000Z',
+      lines: [],
+      status: 'failed',
+      warnings: 1,
+      symbols: [],
+    });
+    writeMap(root, '.java-view', {
+      python: 'odd.py',
+      java: '.java-view/odd.java',
+      engine: 'rules',
+      generatedAt: '2026-09-17T12:30:00.000Z',
+      lines: [],
+      status: 'syntax',
+      warnings: 2,
+      symbols: [{ name: 'Odd', kind: 'class', container: [], javaLine: 5, pythonLine: 1 }],
+    });
+
+    const cache = new SymbolIndexCache(root, '.java-view');
+    const stats = await cache.stats();
+    assert.equal(stats.files, 3);
+    assert.equal(stats.classes, 1);
+    assert.equal(stats.methods, 1);
+    assert.equal(stats.fields, 1);
+    assert.equal(stats.failed, 1);
+    assert.equal(stats.syntaxErrors, 1);
+    assert.equal(stats.warnings, 3);
+    assert.equal(stats.lastGenerated?.toISOString(), '2026-09-17T12:30:00.000Z');
+
+    // Stats follow the same incremental invalidation as the symbol index.
+    fs.rmSync(path.join(cache.mapsRoot, 'broken.java.json'));
+    cache.invalidatePython('broken.py');
+    const after = await cache.stats();
+    assert.equal(after.files, 2);
+    assert.equal(after.failed, 0);
+    assert.equal(after.warnings, 2);
+
+    // An empty output folder reports nothing rather than failing.
+    const empty = await new SymbolIndexCache(fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-empty-')), '.java-view').stats();
+    assert.equal(empty.files, 0);
+    assert.equal(empty.lastGenerated, undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the project-wide members.json is not mistaken for a per-file source map', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-members-map-'));
+  try {
+    writeMap(root, '.java-view', {
+      python: 'models.py',
+      java: '.java-view/models.java',
+      engine: 'rules',
+      generatedAt: '',
+      lines: [],
+      symbols: [{ name: 'Models', kind: 'class', container: [], javaLine: 5, pythonLine: 1 }],
+    });
+    const cache = new SymbolIndexCache(root, '.java-view');
+    fs.writeFileSync(path.join(cache.mapsRoot, 'members.json'), JSON.stringify({ properties: {}, attributes: [], returnTypes: {}, fieldTypes: {} }), 'utf8');
+    const stats = await cache.stats();
+    assert.equal(stats.files, 1, 'members.json must not be counted as a translated file');
+    assert.equal(buildSymbolIndex(root, '.java-view').length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

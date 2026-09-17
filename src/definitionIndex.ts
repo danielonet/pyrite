@@ -9,13 +9,41 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { MAP_DIR, SourceMapFile, mapPathFor } from './mirror';
+import { MAP_DIR, MEMBERS_FILE_NAME, SourceMapFile, ViewStatus, mapPathFor } from './mirror';
 import { SymbolInfo, isInitModule } from './translator';
 
 export interface IndexedSymbol extends SymbolInfo {
   /** Java view file the symbol is declared in, relative to the project root (e.g. ".java-view/pkg/Foo.java"). */
   javaFile: string;
 }
+
+/** What the generated view holds, for the status bar report. */
+export interface ViewStats {
+  /** Python files with a Java view. */
+  files: number;
+  /** Python classes (the synthetic one-per-module wrapper class is not counted). */
+  classes: number;
+  methods: number;
+  fields: number;
+  /** Files whose view is a "translation failed" placeholder. */
+  failed: number;
+  /** Files translated despite Python syntax errors. */
+  syntaxErrors: number;
+  /** Warnings reported across all files. */
+  warnings: number;
+  /** When the most recently translated file was written, or undefined when there is no view. */
+  lastGenerated?: Date;
+}
+
+/** One sidecar map's contribution to the index and the report. */
+interface MapEntry {
+  symbols: IndexedSymbol[];
+  status: ViewStatus;
+  warnings: number;
+  generatedAt?: string;
+}
+
+const EMPTY_STATS: ViewStats = { files: 0, classes: 0, methods: 0, fields: 0, failed: 0, syntaxErrors: 0, warnings: 0 };
 
 /** Read every sidecar map under `<root>/<outputFolder>/.pyrite/maps` and flatten their symbols. */
 export function buildSymbolIndex(root: string, outputFolder = '.java-view'): IndexedSymbol[] {
@@ -32,7 +60,7 @@ export function buildSymbolIndex(root: string, outputFolder = '.java-view'): Ind
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(abs);
-      } else if (entry.isFile() && entry.name.endsWith('.json')) {
+      } else if (entry.isFile() && entry.name.endsWith('.json') && !(dir === mapsRoot && entry.name === MEMBERS_FILE_NAME)) {
         try {
           const map = JSON.parse(fs.readFileSync(abs, 'utf8')) as SourceMapFile;
           for (const sym of map.symbols ?? []) {
@@ -60,8 +88,8 @@ const READ_CONCURRENCY = 64;
  * changes with `invalidateMap` / `invalidatePython`, or `invalidateAll` after a bulk run.
  */
 export class SymbolIndexCache {
-  /** Symbols per sidecar map, keyed by the map's absolute path. */
-  private readonly byMap = new Map<string, IndexedSymbol[]>();
+  /** What each sidecar map contributes, keyed by the map's absolute path. */
+  private readonly byMap = new Map<string, MapEntry>();
   private readonly stale = new Set<string>();
   private needsFullScan = true;
   /** Bumped on every invalidation, so a build that raced with a change is not cached as current. */
@@ -77,6 +105,29 @@ export class SymbolIndexCache {
   /** Absolute folder holding the sidecar maps this cache reads. */
   get mapsRoot(): string {
     return path.join(this.root, this.outputFolder, MAP_DIR);
+  }
+
+  /** A report on the generated view: file, class and error counts. Shares the build with `get`. */
+  async stats(): Promise<ViewStats> {
+    await this.get();
+    const stats: ViewStats = { ...EMPTY_STATS };
+    let latest = 0;
+    for (const entry of this.byMap.values()) {
+      stats.files += 1;
+      stats.warnings += entry.warnings;
+      if (entry.status === 'failed') stats.failed += 1;
+      if (entry.status === 'syntax') stats.syntaxErrors += 1;
+      for (const s of entry.symbols) {
+        // Every file gets a wrapper class named after the module; only nested ones are Python classes.
+        if (s.kind === 'class' && s.container.length > 0) stats.classes += 1;
+        else if (s.kind === 'method') stats.methods += 1;
+        else if (s.kind === 'field') stats.fields += 1;
+      }
+      const at = entry.generatedAt ? Date.parse(entry.generatedAt) : NaN;
+      if (!Number.isNaN(at) && at > latest) latest = at;
+    }
+    if (latest) stats.lastGenerated = new Date(latest);
+    return stats;
   }
 
   /** Every symbol in the output folder. Concurrent callers share one build. */
@@ -128,14 +179,14 @@ export class SymbolIndexCache {
     }
     for (let i = 0; i < toRead.length; i += READ_CONCURRENCY) {
       const batch = toRead.slice(i, i + READ_CONCURRENCY);
-      const read = await Promise.all(batch.map((abs) => readMapSymbols(abs)));
+      const read = await Promise.all(batch.map((abs) => readMapEntry(abs)));
       batch.forEach((abs, j) => {
-        const symbols = read[j];
-        if (symbols) this.byMap.set(abs, symbols);
+        const entry = read[j];
+        if (entry) this.byMap.set(abs, entry);
         else this.byMap.delete(abs);
       });
     }
-    const all = [...this.byMap.values()].flat();
+    const all = [...this.byMap.values()].flatMap((e) => e.symbols);
     if (generation === this.generation) this.current = all;
     return all;
   }
@@ -154,18 +205,24 @@ async function listMapFiles(mapsRoot: string): Promise<string[]> {
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(abs);
-      else if (entry.isFile() && entry.name.endsWith('.json')) files.push(abs);
+      // The project-wide member scan shares this folder but is not a per-file map.
+      else if (entry.isFile() && entry.name.endsWith('.json') && !(dir === mapsRoot && entry.name === MEMBERS_FILE_NAME)) files.push(abs);
     }
   };
   await walk(mapsRoot);
   return files;
 }
 
-/** Symbols of one sidecar map, or undefined when it is missing, partially written or corrupt. */
-async function readMapSymbols(mapAbs: string): Promise<IndexedSymbol[] | undefined> {
+/** One sidecar map, or undefined when it is missing, partially written or corrupt. */
+async function readMapEntry(mapAbs: string): Promise<MapEntry | undefined> {
   try {
     const map = JSON.parse(await fs.promises.readFile(mapAbs, 'utf8')) as SourceMapFile;
-    return (map.symbols ?? []).map((sym) => ({ ...sym, javaFile: map.java }));
+    return {
+      symbols: (map.symbols ?? []).map((sym) => ({ ...sym, javaFile: map.java })),
+      status: map.status ?? 'ok',
+      warnings: map.warnings ?? 0,
+      generatedAt: map.generatedAt,
+    };
   } catch {
     return undefined;
   }

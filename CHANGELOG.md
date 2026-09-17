@@ -22,6 +22,19 @@ All notable changes to Pyrite are recorded here. The format follows
 - **`pyrite.lineWidth` setting** and `--line-width` CLI option to choose the
   width. `0` turns wrapping off.
 
+### Changed
+
+- **The status bar shows the Pyrite logo alone**, without the word "Pyrite".
+  The logo ships as a small icon font (`media/pyrite-icons.woff`, built from
+  `media/icon.svg` with `npm run build:icon-font`) and is contributed as
+  `pyrite-logo`, since VS Code can only draw font glyphs there.
+- **Hovering the status bar shows a report** on the generated view: how many
+  files were translated, how many classes, methods and fields they hold, how
+  many files failed or have Python syntax errors, the warning count, and when
+  the view was last updated. The counts come from the sidecar maps, which now
+  record how each file's translation went. Below the report sit action buttons
+  for regenerating and for deleting the view.
+
 ### Fixed
 
 - Python's implicit joining of adjacent string literals (`"a " "b"`) was
