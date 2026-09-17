@@ -2,7 +2,7 @@
   "name": "pyrite",
   "displayName": "Pyrite",
   "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "danielonnet",
   "license": "MIT",
   "icon": "media/icon.png",
