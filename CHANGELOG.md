@@ -35,7 +35,10 @@ All notable changes to Pyrite are recorded here. The format follows
   many files failed or have Python syntax errors, the warning count, and when
   the view was last updated. The counts come from the sidecar maps, which now
   record how each file's translation went. Below the report sit action buttons
-  for regenerating and for deleting the view.
+  for regenerating and for deleting the view. Clicking the icon opens that report
+  instead of starting a translation, so nothing happens by accident, and the
+  buttons close the report before their progress notification or confirmation
+  appears.
 
 ### Fixed
 

@@ -313,7 +313,7 @@ export function buildStatusReport(stats: ViewStats, outputFolder: string): vscod
   const md = new vscode.MarkdownString();
   md.supportThemeIcons = true;
   // Command links are what a tooltip has instead of buttons; only Pyrite's own commands are trusted.
-  md.isTrusted = { enabledCommands: ['pyrite.generateView', 'pyrite.clearView'] };
+  md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_CLEAR] };
   md.appendMarkdown('**Pyrite — Java view**\n\n');
   if (stats.files === 0) {
     md.appendMarkdown(`No Java view in \`${outputFolder}/\` yet.`);
@@ -338,11 +338,62 @@ export function buildStatusReport(stats: ViewStats, outputFolder: string): vscod
   return md;
 }
 
+/**
+ * Commands behind the tooltip's buttons. They are registered in code but not contributed in
+ * package.json, so they stay out of the Command Palette: their only job is to close the hover
+ * before the real command opens a progress notification or a confirmation dialog.
+ */
+const HOVER_GENERATE = 'pyrite.generateViewFromStatus';
+const HOVER_CLEAR = 'pyrite.clearViewFromStatus';
+/** Clicking the status bar item opens its report instead of translating anything. */
+const SHOW_REPORT = 'pyrite.showStatusReport';
+
+/**
+ * Close the status bar report, then run `action`.
+ *
+ * VS Code has no API to close a workbench hover. Clicking a button in the report leaves the
+ * hover focused, and it closes when focus moves away, so focus is handed back to the editor
+ * (or the status bar when no editor is open) before the command opens its progress
+ * notification or confirmation dialog. Replacing the tooltip forces a re-render on top of
+ * that, and `editor.action.hideHover` clears an editor hover if one happens to be open.
+ */
+async function dismissStatusReport(): Promise<void> {
+  const run = (command: string) => vscode.commands.executeCommand(command).then(undefined, () => undefined);
+  if (statusItem) statusItem.tooltip = new vscode.MarkdownString('**Pyrite** — working...');
+  await run(vscode.window.visibleTextEditors.length ? 'workbench.action.focusActiveEditorGroup' : 'workbench.action.focusStatusBar');
+  await run('editor.action.hideHover');
+  // Let the hover widget go before anything is drawn over it.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+}
+
+async function runFromHover(action: () => Promise<void> | void): Promise<void> {
+  await dismissStatusReport();
+  try {
+    await action();
+  } finally {
+    await refreshStatusReport();
+  }
+}
+
 /** The tooltip's action row: command links, which render as buttons in a hover. */
 function appendActions(md: vscode.MarkdownString, hasView: boolean): void {
   md.appendMarkdown('\n\n---\n\n');
-  const generate = `[$(play) ${hasView ? 'Regenerate Java view' : 'Generate Java view'}](command:pyrite.generateView)`;
-  md.appendMarkdown(hasView ? `${generate} &nbsp;&nbsp; [$(trash) Delete view](command:pyrite.clearView)` : generate);
+  const generate = `[$(play) ${hasView ? 'Regenerate Java view' : 'Generate Java view'}](command:${HOVER_GENERATE})`;
+  md.appendMarkdown(hasView ? `${generate} &nbsp;&nbsp; [$(trash) Delete view](command:${HOVER_CLEAR})` : generate);
+}
+
+/**
+ * Open the status bar item's report. Clicking the item focuses it, and VS Code's
+ * `workbench.action.showHover` opens (and focuses) the hover of the focused element, so the
+ * report appears on a click and can be reached from the keyboard, not only by hovering.
+ */
+async function showStatusReport(): Promise<void> {
+  await refreshStatusReport();
+  try {
+    await vscode.commands.executeCommand('workbench.action.showHover');
+  } catch {
+    // Older VS Code without that command: the hover still opens on hover.
+  }
 }
 
 /** Recompute the status bar tooltip from the sidecar maps of the active workspace folder. */
@@ -365,7 +416,8 @@ export function activate(context: vscode.ExtensionContext): void {
   // The label is the logo alone; screen readers and the status bar menu still need a name.
   statusItem.name = 'Pyrite';
   statusItem.accessibilityInformation = { label: 'Pyrite: Java view' };
-  statusItem.command = 'pyrite.generateView';
+  // Clicking opens the report; only its buttons act. Translating on a stray click is too easy to do by accident.
+  statusItem.command = SHOW_REPORT;
   statusItem.tooltip = new vscode.MarkdownString('**Pyrite**\n\nReading the generated Java view...');
   statusItem.show();
   void refreshStatusReport();
@@ -374,6 +426,9 @@ export function activate(context: vscode.ExtensionContext): void {
     output,
     statusItem,
     vscode.commands.registerCommand('pyrite.generateView', (uri?: vscode.Uri) => generateView(uri)),
+    vscode.commands.registerCommand(HOVER_GENERATE, () => runFromHover(() => generateView())),
+    vscode.commands.registerCommand(HOVER_CLEAR, () => runFromHover(() => clearView())),
+    vscode.commands.registerCommand(SHOW_REPORT, () => showStatusReport()),
     vscode.commands.registerCommand('pyrite.translateCurrentFile', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.languageId !== 'python') {
