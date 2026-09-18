@@ -40,7 +40,7 @@ my-project/                          my-project/.java-view/
 - **Status bar report** – the Pyrite logo sits in the status bar; hovering it
   shows how many files, classes, methods and fields the Java view holds, plus
   any failures, Python syntax errors and warnings, with buttons to regenerate
-  or delete the view. Clicking the icon opens the same report; only its buttons act.
+  or delete the view. Clicking the icon opens the same report.
 - **Two-way navigation** – `Ctrl+Alt+J` jumps from a Python line to the matching
   Java line and back, using a per-file line map.
 - **Go to Definition** – F12 / Ctrl+Click / right-click on a class, method or

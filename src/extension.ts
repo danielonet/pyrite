@@ -339,8 +339,8 @@ export function buildStatusReport(stats: ViewStats, outputFolder: string): vscod
 }
 
 /**
- * Commands behind the tooltip's buttons. They are registered in code but not contributed in
- * package.json, so they stay out of the Command Palette: their only job is to close the hover
+ * Commands behind the report's buttons. They are registered in code but not contributed in
+ * package.json, so they stay out of the Command Palette: their only job is to close the report
  * before the real command opens a progress notification or a confirmation dialog.
  */
 const HOVER_GENERATE = 'pyrite.generateViewFromStatus';
@@ -375,7 +375,7 @@ async function runFromHover(action: () => Promise<void> | void): Promise<void> {
   }
 }
 
-/** The tooltip's action row: command links, which render as buttons in a hover. */
+/** The report's action row: command links, which render as buttons in a hover. */
 function appendActions(md: vscode.MarkdownString, hasView: boolean): void {
   md.appendMarkdown('\n\n---\n\n');
   const generate = `[$(play) ${hasView ? 'Regenerate Java view' : 'Generate Java view'}](command:${HOVER_GENERATE})`;
