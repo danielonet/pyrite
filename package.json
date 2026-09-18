@@ -163,13 +163,18 @@
             "docstringOnly",
             "none"
           ],
+          "enumItemLabels": [
+            "Always generate",
+            "Generate where exists",
+            "Never generate"
+          ],
           "enumDescriptions": [
-            "Always generate Javadoc for every class and method. When there is no docstring, the description is extrapolated from the name and @param/@return from the signature.",
-            "Only generate Javadoc for a class or method that has documentation in the Python code (still adding @param/@return); everything else gets no Javadoc. (default)",
-            "Never generate Javadoc. Docstrings are kept as plain comments instead, like any other construct without a clean Java equivalent."
+            "Every class and method gets Javadoc, written from its name when it has no docstring.",
+            "Only classes and methods that have a Python docstring get Javadoc.",
+            "No Javadoc. Docstrings stay as plain comments."
           ],
           "default": "docstringOnly",
-          "description": "How much Javadoc to generate for classes and methods in the Java view."
+          "markdownDescription": "How much Javadoc to generate in the Java view.\n\n- **Always generate**: every class and method, written from its name when it has no docstring.\n- **Generate where exists** (default): only classes and methods that have a Python docstring.\n- **Never generate**: no Javadoc. Docstrings stay as plain comments."
         },
         "pyrite.javadocTestCode": {
           "type": "boolean",

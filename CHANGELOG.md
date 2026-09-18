@@ -27,7 +27,9 @@ All notable changes to Pyrite are recorded here. The format follows
 - **The status bar shows the Pyrite logo alone**, without the word "Pyrite".
   The logo ships as a small icon font (`media/pyrite-icons.woff`, built from
   `media/icon.svg` with `npm run build:icon-font`) and is contributed as
-  `pyrite-logo`, since VS Code can only draw font glyphs there.
+  `pyrite-logo`, since VS Code can only draw font glyphs there. The outline
+  fills 85% of the em box so it sits beside the built-in icons rather than
+  towering over them; change `GLYPH_SCALE` in the build script to adjust.
 - **Hovering the status bar shows a report** on the generated view: how many
   files were translated, how many classes, methods and fields they hold, how
   many files failed or have Python syntax errors, the warning count, and when
