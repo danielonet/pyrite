@@ -1,7 +1,71 @@
-# Phase 2 — edit the Java view, sync back (not implemented)
+# Phase 2 — local LLM alongside the rules engine
 
-Roadmap only. No code exists for this yet; [phase-1.md](phase-1.md) covers
-what is actually shipped today.
+Phase 2 is delivered in two steps. **Step 1, the `hybrid` engine, is
+implemented** (below). **Step 2, editing the Java view and syncing back to
+Python, is still roadmap only** (the rest of this file). [phase-1.md](phase-1.md)
+covers the rules engine both steps build on.
+
+## Step 1 — `hybrid` engine (implemented)
+
+The rules engine translates every file: fast, deterministic, offline. A local
+[Ollama](https://ollama.com) model then rewrites only the *functions* the rules
+handle badly. It is the "pulled plug" LLM engine from
+[llm-engine.md](llm-engine.md) brought back, but local (no API key, no cloud)
+and scoped to hard functions instead of whole files.
+
+Code: `src/translator/ollama/`
+
+- `hardBlocks.ts` — `findHardBlocks` picks the outermost `def` blocks that are
+  hard. A function is hard only when the rules demonstrably fail on it: the
+  rules engine flagged something inside it (a warning, or a `TODO:
+  untranslated` line), or it uses a construct known to come out wrong (nested
+  comprehension, `:=`). Generators, `async`/`await`, lambdas and `exec`/`eval`
+  are translated acceptably by the rules (annotated in a comment), so they do
+  not qualify. The unit of work is the function: the sample project sends 0 of
+  its 54 functions to the model, and a file with no hard function never
+  touches Ollama.
+- `hybridTranslator.ts` — `HybridTranslator` runs the rules first, then for
+  each hard function (bottom-up, at most `maxBlocksPerFile`) sends the numbered
+  Python plus the rules' Java draft to the model, and splices the answer over
+  the draft. The model tags header lines with `// py:N`; the markers are
+  stripped back into the source map (the same idea as the old LLM engine), so
+  `Ctrl+Alt+J` navigation and Go to Definition keep working. A note line
+  (`// Rewritten by <model> (<reason>) ...`) marks every rewritten function.
+- `ollamaClient.ts` — `POST /api/chat`, `stream: false`, `temperature: 0`,
+  `think: false` (thinking models are far too slow here).
+
+Behavior worth knowing:
+
+- **Fail soft, never fail silent.** Ollama unreachable, a timeout, an HTTP
+  error or an unusable answer (unbalanced braces, Markdown left in) keeps the
+  rules output for that function and adds a warning. After the server is found
+  unreachable the translator stops trying for 60 s instead of waiting on every
+  function.
+- **Cache.** Answers are keyed by model + prompt and stored in
+  `<outputFolder>/.pyrite/ollama-cache.json`, so a regeneration or a save only
+  calls the model for functions that changed.
+- **Speed.** On a CPU-only machine a 4B model took minutes per function (the
+  first request also loads the model), so the default timeout is 300 s and
+  `maxFunctionsPerFile` caps the cost. Prefer a small code model
+  (`qwen2.5-coder`) and a GPU when you have one.
+
+Use it:
+
+- Settings: `pyrite.engine = "hybrid"`, plus `pyrite.ollama.url`,
+  `pyrite.ollama.model`, `pyrite.ollama.timeoutSeconds`,
+  `pyrite.ollama.maxFunctionsPerFile`.
+- CLI: `pyrite <root> --engine hybrid [--ollama-url URL] [--ollama-model NAME]`.
+
+Tests: `src/test/hybrid.test.ts` uses a fake chat function, so they need no
+server.
+
+Not done yet: choosing hard functions by anything smarter than the heuristics
+above, running the model on module-level statements (only `def` blocks are
+sent), and a per-function "re-translate with the model" command.
+
+## Step 2 — edit the Java view, sync back (not implemented)
+
+Roadmap only. No code exists for this yet.
 
 ## Goal
 

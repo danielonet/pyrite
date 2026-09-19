@@ -1,6 +1,6 @@
 # LLM engine — pulled the plug (concept preserved here)
 
-**Status: removed from the codebase.** This document is the record of the
+**Status: removed from the codebase; superseded by the local `hybrid` engine ([phase-2.md](phase-2.md)).** This document is the record of the
 `llm` translation engine that used to sit alongside the `rules` engine
 (see [phase-1.md](phase-1.md)), kept so it can be re-plugged in later
 without re-deriving the design. The code below is no longer in `src/`; it is

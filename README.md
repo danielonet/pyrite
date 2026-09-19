@@ -124,7 +124,8 @@ Use `--dry-run` to build and package without publishing.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `pyrite.engine` | `rules` | translation engine (`rules` is the only one today) |
+| `pyrite.engine` | `rules` | `rules`, or `hybrid` (rules + a local Ollama model for hard functions, see [architecture/phase-2.md](architecture/phase-2.md)) |
+| `pyrite.ollama.url` / `.model` / `.timeoutSeconds` / `.maxFunctionsPerFile` | `http://localhost:11434` / `qwen2.5-coder:7b` / `300` / `10` | settings for the `hybrid` engine |
 | `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root) |
 | `pyrite.exclude` | venv, node_modules, ... | glob patterns to skip |
 | `pyrite.watch` | `true` | re-translate on save |

@@ -87,11 +87,11 @@ export interface TranslateResult {
   /** Human-readable notes about constructs that could not be translated faithfully. */
   warnings: string[];
   /** Which engine produced the result. */
-  engine: 'rules';
+  engine: 'rules' | 'hybrid';
 }
 
 export interface Translator {
-  readonly name: 'rules';
+  readonly name: 'rules' | 'hybrid';
   translate(input: TranslateInput): Promise<TranslateResult>;
 }
 

@@ -2,7 +2,7 @@
   "name": "pyrite",
   "displayName": "Pyrite",
   "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "publisher": "danielonnet",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -122,13 +122,37 @@
         "pyrite.engine": {
           "type": "string",
           "enum": [
-            "rules"
+            "rules",
+            "hybrid"
           ],
           "enumDescriptions": [
-            "Deterministic rule-based translator. Fast, offline, no API key. Best-effort Java syntax."
+            "Deterministic rule-based translator. Fast, offline, no API key. Best-effort Java syntax.",
+            "Rules engine, plus a local Ollama model that rewrites only the functions the rules handle badly. Needs a running Ollama; falls back to the rules output if it is not reachable."
           ],
           "default": "rules",
           "description": "Translation engine used to produce the Java view."
+        },
+        "pyrite.ollama.url": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Base URL of the Ollama server used by the hybrid engine."
+        },
+        "pyrite.ollama.model": {
+          "type": "string",
+          "default": "qwen3.5:4b",
+          "description": "Ollama model used by the hybrid engine (a name from `ollama list`)."
+        },
+        "pyrite.ollama.timeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 300,
+          "description": "Give up on one Ollama request after this many seconds and keep the rules translation."
+        },
+        "pyrite.ollama.maxFunctionsPerFile": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "At most this many functions per file are sent to Ollama; the rest keep the rules translation."
         },
         "pyrite.outputFolder": {
           "type": "string",

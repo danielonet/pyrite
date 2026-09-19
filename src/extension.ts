@@ -17,7 +17,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { createTranslator, EngineName, JavadocMode, Translator } from './translator';
+import { createTranslator, EngineName, JavadocMode, OllamaOptions, ollamaCacheFile, Translator } from './translator';
 import { javaLineFor, javaPathFor, mirrorFile, pythonLineFor, readSourceMap, removeMirroredFile, removeMirroredFolder, isExcluded } from './mirror';
 import { runMirrorInBackground } from './backgroundMirror';
 import { SymbolIndexCache, ViewStats, resolveDefinition } from './definitionIndex';
@@ -53,6 +53,10 @@ interface Settings {
   javadocTestCode: boolean;
   lombok: boolean;
   lineWidth: number;
+  ollamaUrl: string;
+  ollamaModel: string;
+  ollamaTimeoutSeconds: number;
+  ollamaMaxFunctions: number;
 }
 
 function settings(): Settings {
@@ -66,12 +70,27 @@ function settings(): Settings {
     javadocTestCode: cfg.get<boolean>('javadocTestCode', false),
     lombok: cfg.get<boolean>('lombok', true),
     lineWidth: cfg.get<number>('lineWidth', 120),
+    ollamaUrl: cfg.get<string>('ollama.url', 'http://localhost:11434'),
+    ollamaModel: cfg.get<string>('ollama.model', 'qwen2.5-coder:7b'),
+    ollamaTimeoutSeconds: cfg.get<number>('ollama.timeoutSeconds', 300),
+    ollamaMaxFunctions: cfg.get<number>('ollama.maxFunctionsPerFile', 10),
   };
 }
 
-function buildTranslator(): Translator {
+/** Ollama settings for the hybrid engine; the answer cache lives in the project's output folder. */
+function ollamaOptions(s: Settings, root: string): Partial<OllamaOptions> {
+  return {
+    url: s.ollamaUrl,
+    model: s.ollamaModel,
+    timeoutMs: s.ollamaTimeoutSeconds * 1000,
+    maxBlocksPerFile: s.ollamaMaxFunctions,
+    cacheFile: ollamaCacheFile(root, s.outputFolder),
+  };
+}
+
+function buildTranslator(root: string): Translator {
   const s = settings();
-  const { translator, note } = createTranslator({ engine: s.engine });
+  const { translator, note } = createTranslator({ engine: s.engine, ollama: ollamaOptions(s, root) });
   if (note) {
     output.appendLine(note);
     void vscode.window.showWarningMessage(note);
@@ -123,6 +142,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
       const run = runMirrorInBackground(
         {
           engine: s.engine,
+          ollama: ollamaOptions(s, root.uri.fsPath),
           options: {
             root: root.uri.fsPath,
             outputFolder: s.outputFolder,
@@ -177,7 +197,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   const s = settings();
   const rel = relPath(root, pyUri.fsPath);
   if (isExcluded(rel, s.exclude)) return undefined;
-  const translator = buildTranslator();
+  const translator = buildTranslator(root.uri.fsPath);
   statusItem.text = STATUS_BUSY;
   statusItem.show();
   try {
@@ -304,37 +324,61 @@ function timeAgo(when: Date): string {
   return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
-function count(n: number, singular: string, plural = `${singular}s`): string {
-  return `${n.toLocaleString()} ${n === 1 ? singular : plural}`;
+/** A fixed-width bar for a 0-1 fraction, like the usage bars in a Copilot report. */
+function progressBar(fraction: number, width = 20): string {
+  const filled = Math.max(0, Math.min(width, Math.round(fraction * width)));
+  return '█'.repeat(filled) + '░'.repeat(width - filled);
 }
 
-/** The status bar tooltip: what the Java view contains and what went wrong, as Markdown. */
+/**
+ * The status bar tooltip, laid out like the Copilot status report but kept short: a title, the
+ * counts as a list (names left, values right-aligned) between two rules, a health bar with its
+ * percentage and problems, one line of settings and freshness, and the buttons.
+ */
 export function buildStatusReport(stats: ViewStats, outputFolder: string): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.supportThemeIcons = true;
+  md.supportHtml = true;
   // Command links are what a tooltip has instead of buttons; only Pyrite's own commands are trusted.
-  md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_CLEAR] };
-  md.appendMarkdown('**Pyrite — Java view**\n\n');
+  md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_CLEAR, SHOW_WARNINGS, OPEN_SETTINGS] };
+  md.appendMarkdown('## Pyrite\n\n');
   if (stats.files === 0) {
     md.appendMarkdown(`No Java view in \`${outputFolder}/\` yet.`);
     appendActions(md, false);
     return md;
   }
-  md.appendMarkdown(`$(file-code) ${count(stats.files, 'file')} translated to \`${outputFolder}/\`\n\n`);
-  // The declaration counts are their own group, fenced by rules. Headings enlarge the text and,
-  // since a hover renders codicons at the inherited font size, the icons with it.
+
+  const num = (n: number) => n.toLocaleString();
+  // A hover cannot set a font size, but it renders headings larger (and codicons with them), so the counts are headings.
+  const big = (text: string) => `<h4>${text}</h4>`;
+  const link = (text: string) => `[${text}](command:${SHOW_WARNINGS})`;
+
+  // The counts as a list: names on the left, values right-aligned, fenced by a thin rule above and below.
+  const row = (label: string, value: number) => `| ${big(label)} | ${big(num(value))} |\n`;
   md.appendMarkdown('---\n\n');
-  md.appendMarkdown(`### $(symbol-class) ${count(stats.classes, 'class', 'classes')}\n\n`);
-  md.appendMarkdown(`### $(symbol-method) ${count(stats.methods, 'method')}\n\n`);
-  md.appendMarkdown(`### $(symbol-field) ${count(stats.fields, 'field')}\n\n`);
-  md.appendMarkdown('---\n\n');
+  md.appendMarkdown('| | |\n|:--|--:|\n');
+  md.appendMarkdown(row('$(symbol-class) Classes', stats.classes));
+  md.appendMarkdown(row('$(symbol-method) Methods', stats.methods));
+  md.appendMarkdown(row('$(file-code) Files', stats.files));
+  md.appendMarkdown(row('$(symbol-field) Fields', stats.fields));
+  md.appendMarkdown('\n---\n\n');
+
+  // Health: the share of files that translated without a failure or a Python syntax error, and any problems on one line.
+  const clean = Math.max(0, stats.files - stats.failed - stats.syntaxErrors);
+  const percent = Math.round((clean / stats.files) * 100);
+  md.appendMarkdown(`\`${progressBar(clean / stats.files)}\` &nbsp; **${percent}%** clean\n\n`);
   const problems: string[] = [];
-  if (stats.failed) problems.push(`$(error) ${count(stats.failed, 'file')} failed to translate`);
-  if (stats.syntaxErrors) problems.push(`$(warning) ${count(stats.syntaxErrors, 'file')} with Python syntax errors`);
-  if (stats.warnings) problems.push(`$(info) ${count(stats.warnings, 'warning')}`);
-  md.appendMarkdown(problems.length ? `${problems.join('\n\n')}\n\n` : '$(check) No errors or warnings\n\n');
-  if (stats.lastGenerated) md.appendMarkdown(`Last updated ${timeAgo(stats.lastGenerated)}.`);
-  appendActions(md, stats.files > 0);
+  if (stats.failed) problems.push(link(`$(error) ${num(stats.failed)} failed`));
+  if (stats.syntaxErrors) problems.push(link(`$(warning) ${num(stats.syntaxErrors)} syntax errors`));
+  if (stats.warnings) problems.push(link(`$(info) ${num(stats.warnings)} ${stats.warnings === 1 ? 'warning' : 'warnings'}`));
+  md.appendMarkdown(problems.length ? `${problems.join(' &nbsp;·&nbsp; ')}\n\n` : '$(check) No errors or warnings\n\n');
+
+  // Settings and freshness share one line.
+  const cfg = settings();
+  const info = [cfg.engine === 'hybrid' ? `hybrid (${cfg.ollamaModel})` : cfg.engine, `\`${outputFolder}/\``, `save: ${cfg.watch ? 'on' : 'off'}`];
+  if (stats.lastGenerated) info.push(timeAgo(stats.lastGenerated));
+  md.appendMarkdown(`${info.join(' &nbsp;·&nbsp; ')}\n\n`);
+  appendActions(md, true);
   return md;
 }
 
@@ -347,6 +391,10 @@ const HOVER_GENERATE = 'pyrite.generateViewFromStatus';
 const HOVER_CLEAR = 'pyrite.clearViewFromStatus';
 /** Clicking the status bar item opens its report instead of translating anything. */
 const SHOW_REPORT = 'pyrite.showStatusReport';
+/** Lists the warnings and errors of the last translation in the Output panel. */
+const SHOW_WARNINGS = 'pyrite.showWarnings';
+/** VS Code's own command that opens Settings; used by the report's Settings link. */
+const OPEN_SETTINGS = 'workbench.action.openSettings';
 
 /**
  * Close the status bar report, then run `action`.
@@ -379,7 +427,8 @@ async function runFromHover(action: () => Promise<void> | void): Promise<void> {
 function appendActions(md: vscode.MarkdownString, hasView: boolean): void {
   md.appendMarkdown('\n\n---\n\n');
   const generate = `[$(play) ${hasView ? 'Regenerate Java view' : 'Generate Java view'}](command:${HOVER_GENERATE})`;
-  md.appendMarkdown(hasView ? `${generate} &nbsp;&nbsp; [$(trash) Delete view](command:${HOVER_CLEAR})` : generate);
+  const settingsLink = `[$(settings-gear) Settings](command:${OPEN_SETTINGS}?${encodeURIComponent(JSON.stringify(['pyrite']))})`;
+  md.appendMarkdown(hasView ? `${generate} &nbsp;&nbsp; [$(trash) Delete view](command:${HOVER_CLEAR}) &nbsp;&nbsp; ${settingsLink}` : `${generate} &nbsp;&nbsp; ${settingsLink}`);
 }
 
 /**
@@ -393,6 +442,25 @@ async function showStatusReport(): Promise<void> {
     await vscode.commands.executeCommand('workbench.action.showHover');
   } catch {
     // Older VS Code without that command: the hover still opens on hover.
+  }
+}
+
+/** Show every warning and error of the current view in the Output panel. */
+async function showWarnings(): Promise<void> {
+  try {
+    const root = rootFor();
+    if (!root) return;
+    const s = settings();
+    const stats = await symbolIndexFor(root, s.outputFolder).stats();
+    output.appendLine('');
+    output.appendLine(`--- Pyrite warnings and errors (${stats.warnings}) for ${s.outputFolder}/ ---`);
+    if (stats.warningMessages.length) for (const m of stats.warningMessages) output.appendLine(`  ${m}`);
+    else if (stats.warnings) output.appendLine('  The messages were not stored by the version that generated this view. Regenerate the Java view to list them.');
+    else output.appendLine('  No warnings or errors.');
+    output.show(false);
+  } catch (err) {
+    output.appendLine(`error: could not list warnings: ${err instanceof Error ? err.message : String(err)}`);
+    output.show(false);
   }
 }
 
@@ -429,6 +497,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(HOVER_GENERATE, () => runFromHover(() => generateView())),
     vscode.commands.registerCommand(HOVER_CLEAR, () => runFromHover(() => clearView())),
     vscode.commands.registerCommand(SHOW_REPORT, () => showStatusReport()),
+    vscode.commands.registerCommand(SHOW_WARNINGS, () => showWarnings()),
     vscode.commands.registerCommand('pyrite.translateCurrentFile', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.languageId !== 'python') {

@@ -79,6 +79,7 @@ export class PyriteAboutViewProvider implements vscode.WebviewViewProvider {
     const pkg = this.context.extension.packageJSON as { version?: string; description?: string };
     const cfg = vscode.workspace.getConfiguration('pyrite');
     const engine = cfg.get<string>('engine', 'rules');
+    const ollamaModel = cfg.get<string>('ollama.model', 'qwen2.5-coder:7b');
     const outputFolder = cfg.get<string>('outputFolder', '.java-view');
     const watch = cfg.get<boolean>('watch', true);
     const javadoc = cfg.get<string>('javadoc', 'docstringOnly');
@@ -138,7 +139,7 @@ export class PyriteAboutViewProvider implements vscode.WebviewViewProvider {
 
   <h3>Current configuration</h3>
   <table>
-    <tr><td class="key">Engine</td><td class="val">${escapeHtml(engine)}</td></tr>
+    <tr><td class="key">Engine</td><td class="val">${escapeHtml(engine === 'hybrid' ? `hybrid (rules + Ollama ${ollamaModel})` : engine)}</td></tr>
     <tr><td class="key">Output folder</td><td class="val">${escapeHtml(outputFolder)}/</td></tr>
     <tr><td class="key">Watch on save</td><td class="val">${watch ? 'on' : 'off'}</td></tr>
     <tr><td class="key">Javadoc</td><td class="val">${escapeHtml(javadoc)}</td></tr>

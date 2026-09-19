@@ -10,11 +10,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Worker } from 'worker_threads';
 import { MirrorOptions, MirrorSummary, mirrorProject } from './mirror';
-import { EngineName, createTranslator } from './translator';
+import { EngineName, OllamaOptions, createTranslator } from './translator';
 
 /** Everything the worker needs to run a mirror. Must be structured-cloneable: no callbacks. */
 export interface BackgroundMirrorInput {
   engine: EngineName;
+  /** Ollama settings for the `hybrid` engine. */
+  ollama?: Partial<OllamaOptions>;
   options: Omit<MirrorOptions, 'onProgress' | 'isCancelled'>;
 }
 
@@ -75,7 +77,7 @@ export function runMirrorInBackground(input: BackgroundMirrorInput, onProgress?:
 
 function runMirrorInProcess(input: BackgroundMirrorInput, onProgress?: ProgressCallback): BackgroundMirror {
   let cancelled = false;
-  const { translator } = createTranslator({ engine: input.engine });
+  const { translator } = createTranslator({ engine: input.engine, ollama: input.ollama });
   return {
     result: mirrorProject(translator, { ...input.options, onProgress, isCancelled: () => cancelled }),
     cancel: () => {

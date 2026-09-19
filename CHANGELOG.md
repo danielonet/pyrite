@@ -6,6 +6,16 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`hybrid` engine (Phase 2): rules + a local Ollama model.** The rules engine
+  still translates every file; only functions it handles badly (a warning, an
+  untranslated statement, nested comprehensions, walrus) are rewritten by the model. Fails soft: an
+  unreachable or slow Ollama, or an unusable answer, keeps the rules output and
+  adds a warning. Answers are cached in `.java-view/.pyrite/ollama-cache.json`.
+  New settings `pyrite.ollama.url`, `.model`, `.timeoutSeconds`,
+  `.maxFunctionsPerFile`; CLI `--engine hybrid --ollama-url --ollama-model`.
+
 ## [0.2.1] - 2026-09-17
 
 ### Added

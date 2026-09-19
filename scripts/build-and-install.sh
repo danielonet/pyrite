@@ -22,28 +22,42 @@ echo "==> Working in $ROOT_DIR"
 #    non-interactive runner), try to pick up nvm and switch to a Node that
 #    satisfies REQUIRED_NODE_MAJOR before it gets used below.
 REQUIRED_NODE_MAJOR=20
-node_major() { node -e 'console.log(process.versions.node.split(".")[0])'; }
+node_major() {
+  if command -v node >/dev/null 2>&1; then
+    node -e 'console.log(process.versions.node.split(".")[0])'
+  else
+    echo 0
+  fi
+}
 
 if [ "$(node_major)" -lt "$REQUIRED_NODE_MAJOR" ]; then
-  echo "==> Node $(node -v) is too old for @vscode/vsce (needs >= $REQUIRED_NODE_MAJOR); looking for nvm..."
+  echo "==> Node not found or too old (needs >= $REQUIRED_NODE_MAJOR); looking for nvm..."
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+    # Fresh machine: install nvm (needs curl or wget).
+    echo "==> nvm not found; installing it into $NVM_DIR..."
+    NVM_INSTALL_URL="https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "$NVM_INSTALL_URL" | bash
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO- "$NVM_INSTALL_URL" | bash
+    else
+      echo "!! Neither curl nor wget is available to install nvm." >&2
+      echo "   Install one (e.g. 'sudo apt install curl') or install Node >= $REQUIRED_NODE_MAJOR manually." >&2
+      exit 1
+    fi
+  fi
   if [ -s "$NVM_DIR/nvm.sh" ]; then
     # shellcheck disable=SC1091
     \. "$NVM_DIR/nvm.sh"
-    if [ -f "$ROOT_DIR/.nvmrc" ]; then
-      nvm install >/dev/null
-      nvm use >/dev/null
-    else
-      nvm install "$REQUIRED_NODE_MAJOR" >/dev/null
-      nvm use "$REQUIRED_NODE_MAJOR" >/dev/null
-    fi
+    nvm install "$REQUIRED_NODE_MAJOR" >/dev/null
+    nvm use "$REQUIRED_NODE_MAJOR" >/dev/null
     echo "==> Switched to Node $(node -v) via nvm"
   fi
 
   if [ "$(node_major)" -lt "$REQUIRED_NODE_MAJOR" ]; then
-    echo "!! Still on Node $(node -v). Install nvm (https://github.com/nvm-sh/nvm)" >&2
-    echo "   and run: nvm install $REQUIRED_NODE_MAJOR" >&2
-    echo "   then re-run this script." >&2
+    echo "!! Could not get Node >= $REQUIRED_NODE_MAJOR. Install it manually" >&2
+    echo "   (https://nodejs.org or https://github.com/nvm-sh/nvm), then re-run this script." >&2
     exit 1
   fi
 fi
