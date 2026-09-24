@@ -31,6 +31,8 @@ export interface ViewStats {
   syntaxErrors: number;
   /** Warnings reported across all files. */
   warnings: number;
+  /** The text of those warnings (empty for views written before it was stored). */
+  warningMessages: string[];
   /** When the most recently translated file was written, or undefined when there is no view. */
   lastGenerated?: Date;
 }
@@ -40,10 +42,11 @@ interface MapEntry {
   symbols: IndexedSymbol[];
   status: ViewStatus;
   warnings: number;
+  messages: string[];
   generatedAt?: string;
 }
 
-const EMPTY_STATS: ViewStats = { files: 0, classes: 0, methods: 0, fields: 0, failed: 0, syntaxErrors: 0, warnings: 0 };
+const EMPTY_STATS: ViewStats = { files: 0, classes: 0, methods: 0, fields: 0, failed: 0, syntaxErrors: 0, warnings: 0, warningMessages: [] };
 
 /** Read every sidecar map under `<root>/<outputFolder>/.pyrite/maps` and flatten their symbols. */
 export function buildSymbolIndex(root: string, outputFolder = '.java-view'): IndexedSymbol[] {
@@ -110,11 +113,12 @@ export class SymbolIndexCache {
   /** A report on the generated view: file, class and error counts. Shares the build with `get`. */
   async stats(): Promise<ViewStats> {
     await this.get();
-    const stats: ViewStats = { ...EMPTY_STATS };
+    const stats: ViewStats = { ...EMPTY_STATS, warningMessages: [] };
     let latest = 0;
     for (const entry of this.byMap.values()) {
       stats.files += 1;
       stats.warnings += entry.warnings;
+      stats.warningMessages.push(...entry.messages);
       if (entry.status === 'failed') stats.failed += 1;
       if (entry.status === 'syntax') stats.syntaxErrors += 1;
       for (const s of entry.symbols) {
@@ -221,6 +225,7 @@ async function readMapEntry(mapAbs: string): Promise<MapEntry | undefined> {
       symbols: (map.symbols ?? []).map((sym) => ({ ...sym, javaFile: map.java })),
       status: map.status ?? 'ok',
       warnings: map.warnings ?? 0,
+      messages: map.warningMessages ?? [],
       generatedAt: map.generatedAt,
     };
   } catch {

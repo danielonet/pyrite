@@ -69,6 +69,8 @@ export interface SourceMapFile {
   status?: ViewStatus;
   /** Number of warnings the translator reported for this file. */
   warnings?: number;
+  /** The warnings' text, so the editor can list them after a restart. */
+  warningMessages?: string[];
 }
 
 export type ViewStatus = 'ok' | 'syntax' | 'failed';
@@ -309,7 +311,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, knownMembers });
   } catch (err) {
     // Never leave the previous view in place: a reader would take outdated code for current.
-    writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name, 'failed', 1);
+    writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name, 'failed', [`${relativePython}: translation failed: ${err instanceof Error ? err.message : String(err)}`]);
     throw err;
   }
   // A file that does not even parse still gets a view (the rules engine is line-based and
@@ -326,7 +328,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     result = prependLines(result, header);
     result.warnings.push(`${relativePython}:${issues[0].line}: Python syntax error (${issues[0].message}); the Java view is flagged`);
   }
-  const javaAbs = writeView(root, relativePython, outputFolder, result.java, result.sourceMap, result.symbols, result.engine, issues.length ? 'syntax' : 'ok', result.warnings.length);
+  const javaAbs = writeView(root, relativePython, outputFolder, result.java, result.sourceMap, result.symbols, result.engine, issues.length ? 'syntax' : 'ok', result.warnings);
   return { skipped: false, javaAbs, result };
 }
 
@@ -350,14 +352,14 @@ function writeView(
   symbols: SymbolInfo[],
   engine: string,
   status: ViewStatus = 'ok',
-  warnings = 0,
+  warnings: string[] = [],
 ): string {
   const outRoot = path.join(root, outputFolder);
   const javaRel = javaPathFor(relativePython);
   const javaAbs = path.join(outRoot, javaRel);
   fs.mkdirSync(path.dirname(javaAbs), { recursive: true });
   fs.writeFileSync(javaAbs, java, 'utf8');
-  const map: SourceMapFile = { python: relativePython, java: `${outputFolder}/${javaRel}`, engine, generatedAt: new Date().toISOString(), lines, symbols, status, warnings };
+  const map: SourceMapFile = { python: relativePython, java: `${outputFolder}/${javaRel}`, engine, generatedAt: new Date().toISOString(), lines, symbols, status, warnings: warnings.length, warningMessages: warnings };
   const mapAbs = path.join(outRoot, mapPathFor(relativePython));
   fs.mkdirSync(path.dirname(mapAbs), { recursive: true });
   fs.writeFileSync(mapAbs, JSON.stringify(map), 'utf8');

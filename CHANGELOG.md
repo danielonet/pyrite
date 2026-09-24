@@ -6,14 +6,26 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`hybrid` engine (Phase 2): rules + a local Ollama model.** The rules engine
+  still translates every file; only functions it handles badly (a warning, an
+  untranslated statement, nested comprehensions, walrus) are rewritten by the model. Fails soft: an
+  unreachable or slow Ollama, or an unusable answer, keeps the rules output and
+  adds a warning. Answers are cached in `.java-view/.pyrite/ollama-cache.json`.
+  New settings `pyrite.ollama.url`, `.model`, `.timeoutSeconds`,
+  `.maxFunctionsPerFile`; CLI `--engine hybrid --ollama-url --ollama-model`.
+
 ### Changed
 
 - **New logo.** The two Python snakes around a steaming cup of Java, in
   `media/icon.png`, the Activity Bar outline and the status bar glyph.
 - **The status bar report is laid out like the Copilot status panel**: a
-  title row with a Regenerate button and a delete icon, the file count with
-  when the view was last updated, a large "translated" percentage with a
-  meter, then right-aligned rows for classes, methods, fields and problems.
+  title row with a Regenerate button, a delete icon and a settings gear, the
+  file count with when the view was last updated, a large "clean" percentage
+  with a meter, then right-aligned rows for classes, methods, fields,
+  problems (each opens the warnings list) and the engine and
+  translate-on-save settings.
 
 ## [0.2.1] - 2026-09-17
 

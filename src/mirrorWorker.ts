@@ -23,7 +23,7 @@ port.on('message', (request: WorkerRequest) => {
 
 void (async () => {
   try {
-    const { translator } = createTranslator({ engine: input.engine });
+    const { translator } = createTranslator({ engine: input.engine, ollama: input.ollama });
     let lastProgress = 0;
     const summary = await mirrorProject(translator, {
       ...input.options,

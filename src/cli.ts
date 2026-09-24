@@ -8,7 +8,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { createTranslator, EngineName, JavadocMode } from './translator';
+import { createTranslator, EngineName, JavadocMode, ollamaCacheFile } from './translator';
 import { DEFAULT_EXCLUDES, mirrorProject } from './mirror';
 
 const JAVADOC_MODES: JavadocMode[] = ['always', 'docstringOnly', 'none'];
@@ -18,6 +18,8 @@ interface Args {
   file?: string;
   out: string;
   engine: EngineName;
+  ollamaUrl?: string;
+  ollamaModel?: string;
   javadoc: JavadocMode;
   javadocTestCode: boolean;
   lombok: boolean;
@@ -32,6 +34,15 @@ function parseArgs(argv: string[]): Args {
     const next = () => argv[++i];
     if (a === '--out') args.out = next();
     else if (a === '--file') args.file = next();
+    else if (a === '--engine') {
+      const value = next();
+      if (value !== 'rules' && value !== 'hybrid') {
+        console.error(`Invalid --engine value: ${value} (expected rules or hybrid)`);
+        process.exit(2);
+      }
+      args.engine = value;
+    } else if (a === '--ollama-url') args.ollamaUrl = next();
+    else if (a === '--ollama-model') args.ollamaModel = next();
     else if (a === '--javadoc') {
       const value = next();
       if (!JAVADOC_MODES.includes(value as JavadocMode)) {
@@ -66,17 +77,21 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--quiet]
+  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--engine rules|hybrid] [--quiet]
   pyrite --file <module.py> [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120]
 
   --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).
   --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).
-  --line-width <n>      Wrap generated lines longer than n columns (default: 120, 0 = no wrapping).`);
+  --line-width <n>      Wrap generated lines longer than n columns (default: 120, 0 = no wrapping).
+  --engine hybrid       Also rewrite hard functions with a local Ollama model (--ollama-url, --ollama-model).`);
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const { translator, note } = createTranslator({ engine: args.engine });
+  const { translator, note } = createTranslator({
+    engine: args.engine,
+    ollama: { ...(args.root && { cacheFile: ollamaCacheFile(path.resolve(args.root), args.out) }), ...(args.ollamaUrl && { url: args.ollamaUrl }), ...(args.ollamaModel && { model: args.ollamaModel }) },
+  });
   if (note) console.error(`note: ${note}`);
 
   if (args.file) {
