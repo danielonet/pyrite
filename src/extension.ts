@@ -292,7 +292,7 @@ async function clearView(): Promise<void> {
   void vscode.window.showInformationMessage(`Pyrite: deleted ${s.outputFolder}/.`);
 }
 
-/** How long ago, in words, for the tooltip's footer. */
+/** How long ago, in words, for the report's "Updated" line. */
 function timeAgo(when: Date): string {
   const seconds = Math.max(0, Math.round((Date.now() - when.getTime()) / 1000));
   if (seconds < 60) return 'just now';
@@ -308,33 +308,80 @@ function count(n: number, singular: string, plural = `${singular}s`): string {
   return `${n.toLocaleString()} ${n === 1 ? singular : plural}`;
 }
 
-/** The status bar tooltip: what the Java view contains and what went wrong, as Markdown. */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * The report is HTML laid out like the Copilot status panel: a title row with the main action,
+ * a headline figure with a meter, then label/value rows. A hover's sanitizer only keeps
+ * `color`, `background-color` and `border-radius` in a span's style and `align`/`width` on
+ * table cells, so tables do the alignment and runs of spaces with a background draw the button
+ * and the meter.
+ */
+const icon = (name: string) => `<span class="codicon codicon-${name}"></span>`;
+const REPORT_BUTTON = 'color:var(--vscode-button-foreground);background-color:var(--vscode-button-background);border-radius:4px;';
+const METER_FILL = 'background-color:var(--vscode-progressBar-background);border-radius:2px;';
+const METER_TRACK = 'background-color:var(--vscode-editorWidget-border);border-radius:2px;';
+/** Meter length in spaces; at hover font size this spans most of the report's width. */
+const METER_CELLS = 72;
+
+function titleRow(action: string): string {
+  return `<table width="100%"><tr><td><strong>Pyrite — Java view</strong></td><td align="right">${action}</td></tr></table>\n\n`;
+}
+
+function meter(fraction: number): string {
+  const filled = fraction > 0 ? Math.max(1, Math.round(fraction * METER_CELLS)) : 0;
+  const cells = (n: number, style: string) => (n > 0 ? `<span style="${style}">${'&nbsp;'.repeat(n)}</span>` : '');
+  return `<small>${cells(filled, METER_FILL)}${cells(METER_CELLS - filled, METER_TRACK)}</small>`;
+}
+
+/** Label on the left, value on the right, one table row per pair. */
+function rows(pairs: [string, string][]): string {
+  const tr = pairs.map(([label, value]) => `<tr><td>${label}</td><td align="right">${value}</td></tr>`).join('');
+  return `<table width="100%">${tr}</table>\n\n`;
+}
+
+/** The status bar tooltip: what the Java view contains and what went wrong, as HTML. */
 export function buildStatusReport(stats: ViewStats, outputFolder: string): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
+  md.supportHtml = true;
   md.supportThemeIcons = true;
   // Command links are what a tooltip has instead of buttons; only Pyrite's own commands are trusted.
   md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_CLEAR] };
-  md.appendMarkdown('**Pyrite — Java view**\n\n');
-  if (stats.files === 0) {
-    md.appendMarkdown(`No Java view in \`${outputFolder}/\` yet.`);
-    appendActions(md, false);
+  const folder = `<code>${escapeHtml(outputFolder)}/</code>`;
+  const hasView = stats.files > 0;
+  const generate = `<a href="command:${HOVER_GENERATE}" title="Translate every Python file again"><span style="${REPORT_BUTTON}">&nbsp;&nbsp;${hasView ? 'Regenerate' : 'Generate'}&nbsp;&nbsp;</span></a>`;
+  const clear = `<a href="command:${HOVER_CLEAR}" title="Delete the Java view">${icon('trash')}</a>`;
+  md.appendMarkdown(titleRow(hasView ? `${generate}&nbsp;&nbsp;${clear}` : generate));
+  md.appendMarkdown('---\n\n');
+  if (!hasView) {
+    md.appendMarkdown(`<p>No Java view in ${folder} yet.</p>`);
     return md;
   }
-  md.appendMarkdown(`$(file-code) ${count(stats.files, 'file')} translated to \`${outputFolder}/\`\n\n`);
-  // The declaration counts are their own group, fenced by rules. Headings enlarge the text and,
-  // since a hover renders codicons at the inherited font size, the icons with it.
+
+  const translated = stats.files - stats.failed;
+  const percent = Math.floor((translated / stats.files) * 100);
+  const updated = stats.lastGenerated ? `Updated ${timeAgo(stats.lastGenerated)}` : '';
+  md.appendMarkdown(rows([[`<strong>${count(stats.files, 'file')}</strong> → ${folder}`, updated]]));
+  md.appendMarkdown(`<h2>${percent}%&nbsp;<small><small>translated</small></small></h2>\n\n`);
+  md.appendMarkdown(`<p>${meter(translated / stats.files)}</p>\n\n`);
   md.appendMarkdown('---\n\n');
-  md.appendMarkdown(`### $(symbol-class) ${count(stats.classes, 'class', 'classes')}\n\n`);
-  md.appendMarkdown(`### $(symbol-method) ${count(stats.methods, 'method')}\n\n`);
-  md.appendMarkdown(`### $(symbol-field) ${count(stats.fields, 'field')}\n\n`);
+
+  md.appendMarkdown(
+    rows([
+      [`${icon('symbol-class')} Classes`, stats.classes.toLocaleString()],
+      [`${icon('symbol-method')} Methods`, stats.methods.toLocaleString()],
+      [`${icon('symbol-field')} Fields`, stats.fields.toLocaleString()],
+    ]),
+  );
   md.appendMarkdown('---\n\n');
-  const problems: string[] = [];
-  if (stats.failed) problems.push(`$(error) ${count(stats.failed, 'file')} failed to translate`);
-  if (stats.syntaxErrors) problems.push(`$(warning) ${count(stats.syntaxErrors, 'file')} with Python syntax errors`);
-  if (stats.warnings) problems.push(`$(info) ${count(stats.warnings, 'warning')}`);
-  md.appendMarkdown(problems.length ? `${problems.join('\n\n')}\n\n` : '$(check) No errors or warnings\n\n');
-  if (stats.lastGenerated) md.appendMarkdown(`Last updated ${timeAgo(stats.lastGenerated)}.`);
-  appendActions(md, stats.files > 0);
+
+  const problems: [string, string][] = [];
+  if (stats.failed) problems.push([`${icon('error')} Failed to translate`, count(stats.failed, 'file')]);
+  if (stats.syntaxErrors) problems.push([`${icon('warning')} Python syntax errors`, count(stats.syntaxErrors, 'file')]);
+  if (stats.warnings) problems.push([`${icon('info')} Warnings`, stats.warnings.toLocaleString()]);
+  md.appendMarkdown(rows(problems.length ? problems : [['Problems', `${icon('check')} None`]]));
   return md;
 }
 
@@ -373,13 +420,6 @@ async function runFromHover(action: () => Promise<void> | void): Promise<void> {
   } finally {
     await refreshStatusReport();
   }
-}
-
-/** The report's action row: command links, which render as buttons in a hover. */
-function appendActions(md: vscode.MarkdownString, hasView: boolean): void {
-  md.appendMarkdown('\n\n---\n\n');
-  const generate = `[$(play) ${hasView ? 'Regenerate Java view' : 'Generate Java view'}](command:${HOVER_GENERATE})`;
-  md.appendMarkdown(hasView ? `${generate} &nbsp;&nbsp; [$(trash) Delete view](command:${HOVER_CLEAR})` : generate);
 }
 
 /**

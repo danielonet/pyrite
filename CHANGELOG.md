@@ -6,6 +6,15 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **New logo.** The two Python snakes around a steaming cup of Java, in
+  `media/icon.png`, the Activity Bar outline and the status bar glyph.
+- **The status bar report is laid out like the Copilot status panel**: a
+  title row with a Regenerate button and a delete icon, the file count with
+  when the view was last updated, a large "translated" percentage with a
+  meter, then right-aligned rows for classes, methods, fields and problems.
+
 ## [0.2.1] - 2026-09-17
 
 ### Added
