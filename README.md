@@ -1,3 +1,24 @@
+<p align="center">
+  <img src="media/banner.jpg" alt="Pyrite: translate Python to Java" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=danielonnet.pyrite">
+    <img src="https://vsmarketplacebadges.dev/version-short/danielonnet.pyrite.svg?color=%2300BFFF&label=marketplace" alt="Marketplace version">
+  </a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=danielonnet.pyrite">
+    <img src="https://vsmarketplacebadges.dev/installs-short/danielonnet.pyrite.svg" alt="Installs">
+  </a>
+  <a href="https://github.com/danielonet/pyrite/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/danielonet/pyrite/ci.yml?branch=main" alt="Build">
+  </a>
+  <a href="https://github.com/danielonet/pyrite/blob/main/package.json">
+    <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
+  </a>
+</p>
+
+> **Issues & Bugs**: [danielonet/pyrite/issues](https://github.com/danielonet/pyrite/issues) · **Changelog**: [CHANGELOG.md](CHANGELOG.md)
+
 # Pyrite
 
 **Read Python as if it were Java.**
