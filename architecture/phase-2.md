@@ -59,6 +59,43 @@ Use it:
 Tests: `src/test/hybrid.test.ts` uses a fake chat function, so they need no
 server.
 
+### Real Java imports
+
+After the function rewrites, the hybrid engine swaps the rules' import block
+(`import logging;`, `import typing.Dict;`, `java.util.*` wildcards) for
+explicit imports of real classes, so that a view can one day compile.
+
+Code: `src/translator/imports/`
+
+- `jdkClasses.ts` — every public top-level class of the packages the `java.se`
+  modules export, by package. Generated from a real JDK by
+  `npm run build:jdk-index` (`scripts/build-jdk-index.js` runs
+  `scripts/JdkIndex.java`); the output is committed, so users need no JDK.
+- `javaImports.ts` — `planImports` scans the Java body (strings and comments
+  blanked out) for capitalized names not after a `.` and resolves them, in
+  order: classes declared in the file, project imports, Lombok annotations,
+  `java.lang` (no import), the JDK in `PREFERRED_PACKAGES` order (so `List` is
+  `java.util.List`, never `java.awt.List`), and project classes used without a
+  Python import. Project imports use `KnownMembers.modules` (Python module ->
+  Java module class) and `KnownMembers.classes` (top-level class -> nested
+  class FQN), both filled by the project scan in `mirror.ts`: a capitalized
+  name becomes `import pkg.Module.Name;`, a function or constant
+  `import static pkg.Module.name;`. What is left is sent to the model
+  (`IMPORTS_SYSTEM_PROMPT`, one request per file, cached), and
+  `acceptModelImports` keeps only imports of requested names, with JDK
+  namespaces verified against the index. Decorators the rules kept as
+  annotations (`@Property`, `@Fixture`) have no Java class and are listed,
+  not sent.
+- Non-project Python imports become `// python: <original line>` comments
+  mapped to their Python line, and unresolved names one `// No Java import
+  found for: ...` comment. The source map and symbols are shifted to match.
+
+Not done yet: the rest of what keeps a view from compiling (module-level
+Python calls such as `logging.getLogger(__name__)`, a module class and a
+nested class with the same name, e.g. `OrderService.OrderService`, and file
+names that differ from the public class, e.g. `models.java` holding
+`Models`).
+
 Not done yet: choosing hard functions by anything smarter than the heuristics
 above, running the model on module-level statements (only `def` blocks are
 sent), and a per-function "re-translate with the model" command.

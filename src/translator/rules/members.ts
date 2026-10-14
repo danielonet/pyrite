@@ -65,6 +65,16 @@ export interface KnownMembers {
   returnTypes: Record<string, string>;
   /** `Class.field` -> Java type. */
   fieldTypes: Record<string, string>;
+  /**
+   * Python module, dotted the way the rules engine writes its imports (`app.models`), -> the
+   * fully qualified Java class the module becomes (`app.Models`). Filled by the project scan.
+   */
+  modules?: Record<string, string>;
+  /**
+   * Top-level class name -> fully qualified Java name (`Order` -> `app.Models.Order`), for
+   * importing a class the code uses without Python importing it. A name two modules define is ''.
+   */
+  classes?: Record<string, string>;
 }
 
 /** Java type of a literal / simple value on the right-hand side of an assignment; 'var' when unknown. */
@@ -299,6 +309,11 @@ export function mergeKnownMembers(parts: KnownMembers[]): KnownMembers {
   const conflicts = new Set<string>();
   const fieldConflicts = new Set<string>();
   for (const part of parts) {
+    if (part.modules) merged.modules = { ...merged.modules, ...part.modules };
+    for (const [name, fqn] of Object.entries(part.classes ?? {})) {
+      merged.classes ??= {};
+      merged.classes[name] = name in merged.classes && merged.classes[name] !== fqn ? '' : fqn;
+    }
     for (const a of part.attributes) attributes.add(a);
     for (const [name, info] of Object.entries(part.properties)) {
       const prev = merged.properties[name];

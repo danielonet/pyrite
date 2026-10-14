@@ -156,3 +156,20 @@ export function packageFromPath(relativePath: string): string {
   const parts = relativePath.split('/').slice(0, -1).filter((p) => p && p !== '.');
   return parts.map((p) => p.replace(/[^A-Za-z0-9_]/g, '_')).join('.');
 }
+
+/**
+ * A module's dotted name the way the rules engine writes it in imports: `app/models.py` ->
+ * `app.models`, a package module `app/__init__.py` -> `app`.
+ */
+export function pythonModuleKey(relativePath: string): string {
+  const pkg = packageFromPath(relativePath);
+  if (isInitModule(relativePath)) return pkg;
+  const base = (relativePath.split('/').pop() ?? '').replace(/\.py$/, '');
+  return pkg ? `${pkg}.${base}` : base;
+}
+
+/** Fully qualified name of the Java class a module becomes: `app/models.py` -> `app.Models`. */
+export function javaModuleClass(relativePath: string): string {
+  const pkg = packageFromPath(relativePath);
+  return pkg ? `${pkg}.${moduleClassName(relativePath)}` : moduleClassName(relativePath);
+}

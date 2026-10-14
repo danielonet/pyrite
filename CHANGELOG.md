@@ -15,6 +15,15 @@ All notable changes to Pyrite are recorded here. The format follows
   adds a warning. Answers are cached in `.java-view/.pyrite/ollama-cache.json`.
   New settings `pyrite.ollama.url`, `.model`, `.timeoutSeconds`,
   `.maxFunctionsPerFile`; CLI `--engine hybrid --ollama-url --ollama-model`.
+- **Real Java imports in `hybrid` mode.** The Python-shaped import block
+  (`import logging;`, `import typing.Dict;`, `java.util.*`) is replaced by
+  explicit imports of real classes: JDK classes looked up in an index generated
+  from a real JDK, the classes Pyrite generates for the project's own modules
+  (static imports for functions and constants), Lombok for its annotations,
+  and, for the names left over, the local model, whose suggestions are checked
+  against the JDK. Python imports with no Java counterpart stay as
+  `// python: ...` comments. New setting `pyrite.ollama.resolveImports`
+  (default on); CLI `--no-java-imports`.
 
 ### Changed
 

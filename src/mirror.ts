@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { JavadocMode, KnownMembers, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath } from './translator';
+import { JavadocMode, KnownMembers, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath, javaModuleClass, pythonModuleKey } from './translator';
 import { knownMembersOf, mergeKnownMembers } from './translator/rules/members';
 import { checkSyntax } from './parser/pythonParser';
 import { splitLogicalLines } from './translator/rules/logicalLines';
@@ -281,7 +281,11 @@ export async function scanProjectMembers(root: string, files: string[], isCancel
     if (isCancelled?.()) break;
     await yieldToEventLoop();
     try {
-      parts.push(knownMembersOf(await fs.promises.readFile(path.join(root, rel), 'utf8')));
+      const source = await fs.promises.readFile(path.join(root, rel), 'utf8');
+      const moduleClass = javaModuleClass(rel);
+      // Top-level classes become classes nested in the module's class.
+      const classes = Object.fromEntries([...source.matchAll(/^class\s+(\w+)/gm)].map((m) => [m[1], `${moduleClass}.${m[1]}`]));
+      parts.push({ ...knownMembersOf(source), modules: { [pythonModuleKey(rel)]: moduleClass }, classes });
     } catch {
       // unreadable file: it will be reported when it is translated
     }

@@ -172,6 +172,11 @@
           "minimum": 1,
           "description": "At most this many functions per file are sent to Ollama; the rest keep the rules translation."
         },
+        "pyrite.ollama.resolveImports": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "With the `hybrid` engine, replace the Python-shaped imports (`import logging;`, `import typing.Dict;`, `java.util.*`) with explicit imports of real Java classes: JDK classes from an index of the real JDK, the classes Pyrite generates for your own modules, and Lombok for its annotations. Only the names left over are sent to the model, and every class it suggests is checked against the JDK. A step towards a Java view that compiles."
+        },
         "pyrite.outputFolder": {
           "type": "string",
           "default": ".java-view",
@@ -244,6 +249,7 @@
     "cli": "node out/cli.js",
     "package": "vsce package",
     "build:icon-font": "node scripts/build-icon-font.js",
+    "build:jdk-index": "node scripts/build-jdk-index.js",
     "install:local": "bash scripts/build-and-install.sh",
     "uninstall:local": "bash scripts/uninstall.sh",
     "publish:marketplace": "bash scripts/publish-marketplace.sh"

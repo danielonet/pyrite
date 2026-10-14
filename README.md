@@ -143,7 +143,7 @@ Set the mode with `pyrite.engine`:
 | Mode | What runs | Needs |
 | --- | --- | --- |
 | `rules` (default) | Rules engine only | nothing |
-| `hybrid` | Rules engine for everything, plus the local LLM for the functions the rules cannot handle | a running Ollama and a downloaded model |
+| `hybrid` | Rules engine for everything, plus the local LLM for the functions the rules cannot handle, and [real Java imports](#real-java-imports-hybrid) | a running Ollama and a downloaded model |
 
 How `hybrid` works, per file:
 
@@ -165,6 +165,50 @@ How `hybrid` works, per file:
 
 Model output is not deterministic or guaranteed correct: treat a rewritten function as
 a reading aid and check it against the Python, which is why it is marked.
+
+### Real Java imports (`hybrid`)
+
+The rules engine writes Python's imports as Java-looking lines (`import logging;`,
+`import typing.Dict;`) next to `java.util.*` wildcards: fine for reading, but none of them
+names a class `javac` could find. In `hybrid` mode Pyrite replaces that block with explicit
+imports of real classes, a first step towards a Java view that compiles and runs in simple
+cases:
+
+```java
+// before (rules)                          // after (hybrid)
+import java.util.*;                        import java.util.List;
+import java.util.stream.*;                 import java.util.Map;
+import logging;                            import java.util.logging.Logger;
+import typing.Dict;
+import app.models.Order;                   import lombok.Getter;
+import app.utils.formatting.money;
+                                           import app.Models.Order;
+                                           import static app.utils.Formatting.money;
+
+                                           // python: import logging
+                                           // python: from typing import Dict
+```
+
+1. Every type the Java code uses is looked up in an index of the **real JDK** (every public
+   class of the `java.se` modules, generated from JDK 21): `List` becomes `java.util.List`,
+   `Logger` becomes `java.util.logging.Logger`. `java.lang` needs no import.
+2. Imports of your own modules point at the classes Pyrite generates: a class is nested in its
+   module's class (`app.Models.Order`), and a function or constant becomes a static import.
+   A class used without a Python import (from a type hint, say) is found too.
+3. The Lombok annotations Pyrite writes (`@Getter`, `@Data`, ...) import `lombok.*`.
+4. Only the names left over go to the local model, in one request per file (cached like the
+   function rewrites). Its answer is checked: a JDK class must exist in the JDK, and an import
+   must be for a name the code really uses; anything else is dropped with a warning. A
+   library class it suggests is kept and marked `// suggested by <model>; not in the JDK, needs
+   this library on the classpath`.
+
+Python imports with no Java counterpart stay as `// python: ...` comments (so `Ctrl+Alt+J`
+still jumps to them), and names nobody could resolve are listed in a `// No Java import found
+for: ...` comment. If Ollama is not running, steps 1-3 still apply. Turn it off with
+`pyrite.ollama.resolveImports: false` (CLI: `--no-java-imports`).
+
+The rest of the view is still a reading view (`logging.getLogger(__name__)` is not Java), so
+the imports are what is real today, not the whole file.
 
 ## Running a local LLM with Ollama
 
@@ -277,6 +321,7 @@ Use `--dry-run` to build and package without publishing.
 | `pyrite.ollama.model` | `qwen2.5-coder:7b` | model name, exactly as `ollama list` shows it |
 | `pyrite.ollama.timeoutSeconds` | `300` | give up on one request after this long and keep the rules output |
 | `pyrite.ollama.maxFunctionsPerFile` | `10` | at most this many functions per file go to the model |
+| `pyrite.ollama.resolveImports` | `true` | in `hybrid` mode, replace the Python-shaped imports with real Java ones (see [Real Java imports](#real-java-imports-hybrid)) |
 | `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root) |
 | `pyrite.exclude` | venv, node_modules, ... | glob patterns to skip |
 | `pyrite.watch` | `true` | re-translate on save |
