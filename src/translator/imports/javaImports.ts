@@ -253,7 +253,8 @@ export function planImports(view: JavaView, pythonSource: string, modules: Recor
       imported.add(mod.javaClass.split('.').pop()!);
     } else {
       const name = mod.rest.split('.').pop()!;
-      const fqn = `${mod.javaClass}.${mod.rest}`;
+      // A class named like its module is the module's class itself (OrderService in order_service.py).
+      const fqn = mod.rest === mod.javaClass.split('.').pop() ? mod.javaClass : `${mod.javaClass}.${mod.rest}`;
       // A capitalized name is a class (nested in the module class); anything else, functions
       // and ALL_CAPS constants, is a static member of it.
       if (/^[A-Z]/.test(name) && !/^[A-Z0-9_]+$/.test(name)) {

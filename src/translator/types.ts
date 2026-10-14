@@ -72,6 +72,11 @@ export interface SymbolInfo {
   javaLine: number;
   /** 1-based Python source line the declaration was produced from. */
   pythonLine: number;
+  /**
+   * Set on a module's class (container []) when it is a Python class too: `order_service.py`'s
+   * `class OrderService` becomes the module class instead of being nested in it.
+   */
+  pythonClass?: boolean;
 }
 
 export interface TranslateResult {
@@ -122,33 +127,35 @@ export function isInitModule(relativePath: string): boolean {
 }
 
 /**
- * Name of the Java class a module becomes: `order_service.py` -> `OrderService`;
- * a package module `inventory/__init__.py` is named after its folder, `Inventory`
- * (a root-level `__init__.py` with no folder becomes `Init`).
+ * Name of the Java class a module becomes, which is also its Java file's name:
+ * `order_service.py` -> `OrderService`. A package module `inventory/__init__.py` is named after
+ * its folder plus `PACKAGE_MODULE_FILE_SUFFIX`, `InventoryInit` (a root-level `__init__.py`
+ * becomes `Init`).
  */
 export function moduleClassName(relativePath: string): string {
   const parts = relativePath.split('/');
   const base = parts.pop() ?? 'Module';
-  if (base === '__init__.py') return toPascalCase(parts.pop() || '__init__');
+  if (base === '__init__.py') {
+    const folder = parts.pop();
+    return folder ? toPascalCase(folder) + PACKAGE_MODULE_FILE_SUFFIX : 'Init';
+  }
   return toPascalCase(base);
 }
 
 /**
- * Suffix added to the *file* name of a package module's Java view (never to the class name).
- * `inventory/__init__.py` becomes `class Inventory` written to `inventory/inventoryInit.java`:
- * the suffix hints that the file came from `__init__.py`, and keeps it from colliding with a
- * sibling `inventory.py` -> `inventory.java` on a case-insensitive filesystem (Windows, macOS).
+ * Suffix of a package module's class (and so its file): `inventory/__init__.py` becomes
+ * `class InventoryInit` in `inventory/InventoryInit.java`. The suffix hints that it came from
+ * `__init__.py`, and keeps it apart from a sibling `inventory/inventory.py` -> `Inventory.java`,
+ * which would otherwise be the same class (and, on Windows and macOS, the same file).
  */
 export const PACKAGE_MODULE_FILE_SUFFIX = 'Init';
 
-/** Base name (no extension) of the Java view file a module is written to. */
+/**
+ * Base name (no extension) of the Java view file a module is written to: the name of its public
+ * class, as `javac` requires (`order_service.py` -> `OrderService`).
+ */
 export function javaFileBaseName(relativePath: string): string {
-  if (isInitModule(relativePath)) {
-    // lowerCamelCase: order_items/__init__.py -> orderItemsInit
-    const pascal = moduleClassName(relativePath);
-    return pascal.charAt(0).toLowerCase() + pascal.slice(1) + PACKAGE_MODULE_FILE_SUFFIX;
-  }
-  return (relativePath.split('/').pop() ?? 'module').replace(/\.py$/, '');
+  return moduleClassName(relativePath);
 }
 
 /** Derive a Java package name from a relative file path. */

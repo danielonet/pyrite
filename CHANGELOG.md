@@ -27,6 +27,17 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Changed
 
+- **View files are named after their Java class**, as `javac` requires:
+  `order_service.py` -> `OrderService.java`, `main.py` -> `Main.java`. A
+  package module's class takes the `Init` suffix its file already had,
+  `inventory/__init__.py` -> `class InventoryInit` in `InventoryInit.java`.
+  Views written under the old names are removed on the next regeneration.
+- **A class named like its module is the module's class.** `class
+  OrderService` in `order_service.py` used to become
+  `OrderService.OrderService`, which Java rejects; it is now
+  `public class OrderService` itself, with the module's constants and
+  functions as its static members (an enum's constants stay first).
+- Enum constants followed by methods or fields end with `;`, as Java requires.
 - **New logo.** The two Python snakes around a steaming cup of Java, in
   `media/icon.png`, the Activity Bar outline and the status bar glyph.
 - **The status bar report is laid out like the Copilot status panel**: a

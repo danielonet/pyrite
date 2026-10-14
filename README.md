@@ -39,19 +39,20 @@ The name is the disclaimer. Pyrite is fool's gold: it looks like Java but is not
 it is never meant to compile. It is a faithful *reading view* of the Python underneath.
 
 Pyrite mirrors every `.py` file in your workspace into a `.java-view/`
-folder with the **same directory structure**, translating each module into a
-Java-flavored *reading view*. The view keeps Python's names, order, comments
+folder with the **same directory structure** (each file named after its Java
+class, as Java requires), translating each module into a Java-flavored
+*reading view*. The view keeps Python's names, order, comments
 and docstrings, but uses Java syntax: braces, semicolons, explicit types,
 `for (var x : xs)`, `throw new ...`, streams instead of comprehensions, and
 so on. It is meant to be **read**, not compiled.
 
 ```
 my-project/                          my-project/.java-view/
-├── main.py                          ├── main.java
+├── main.py                          ├── Main.java
 └── inventory/                       └── inventory/
-    ├── models.py            ==>         ├── models.java
+    ├── models.py            ==>         ├── Models.java
     └── services/                        └── services/
-        └── order_service.py                 └── order_service.java
+        └── order_service.py                 └── OrderService.java
 ```
 
 ## Features
@@ -91,8 +92,9 @@ What it maps:
 
 | Python | Java view |
 | --- | --- |
-| module `order_service.py` | `public final class OrderService { ... }` |
+| module `order_service.py` | `public final class OrderService { ... }` in `OrderService.java` |
 | `class Foo(Base):` | `public static class Foo extends Base {` |
+| `class OrderService:` inside `order_service.py` | the module's class itself, `public class OrderService { ... }`, with the module's constants and functions as its static members (Java forbids a nested class named like its enclosing class) |
 | `@dataclass` fields, `self.x = ...` in `__init__` | field declarations with inferred types |
 | `def f(self, a: int, b="x") -> bool:` | `public boolean f(int a, String b /* = "x" */) {` |
 | `__init__`, `__str__`, `__eq__`, `__len__` ... | constructor, `toString()`, `equals()`, `size()` ... |
@@ -111,7 +113,7 @@ What it maps:
 | `ValueError`, `KeyError`, ... | `IllegalArgumentException`, `NoSuchElementException`, ... |
 | docstrings / `# comments` | Javadoc / `// comments` |
 | `inventory/__init__.py` with only a docstring / `__all__` | nothing: Java packages are plain folders |
-| `inventory/__init__.py` with real content (constants, re-exports) | `public final class Inventory`, Javadoc names the original `__init__.py`; written to `inventory/inventoryInit.java`, the `Init` suffix hinting at `__init__.py` and keeping the file distinct from a sibling `inventory.py` on case-insensitive filesystems |
+| `inventory/__init__.py` with real content (constants, re-exports) | `public final class InventoryInit` in `inventory/InventoryInit.java`, Javadoc names the original `__init__.py`; the `Init` suffix hints at `__init__.py` and keeps it apart from a sibling `inventory/inventory.py` (`Inventory.java`) |
 
 Anything without a clean equivalent is kept and annotated with a `/* ... */`
 comment rather than dropped, so the view is always complete.

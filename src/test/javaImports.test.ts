@@ -167,6 +167,13 @@ test('the project scan records each module class and its top-level classes', asy
   const known = await scanProjectMembers(root, ['inventory/models.py', 'inventory/utils/formatting.py', 'inventory/__init__.py']);
   assert.equal(known.modules?.['inventory.models'], 'inventory.Models');
   assert.equal(known.modules?.['inventory.utils.formatting'], 'inventory.utils.Formatting');
-  assert.equal(known.modules?.['inventory'], 'inventory.Inventory');
+  assert.equal(known.modules?.['inventory'], 'inventory.InventoryInit');
   assert.equal(known.classes?.Order, 'inventory.Models.Order');
+});
+
+test('a class named like its module is imported as the module class itself', async () => {
+  const source = 'from .order_service import OrderService\n\ndef make() -> OrderService:\n    return OrderService()\n';
+  const rules = await new RuleBasedTranslator().translate({ source, relativePath: 'app/main.py' });
+  const plan = planImports(rules, source, { 'app.order_service': 'app.OrderService' });
+  assert.deepEqual(plan.project, ['app.OrderService']);
 });

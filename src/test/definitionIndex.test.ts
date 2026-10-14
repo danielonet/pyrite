@@ -22,7 +22,7 @@ test('buildSymbolIndex flattens every sidecar map under the output folder', () =
   try {
     writeMap(root, '.java-view', {
       python: 'models.py',
-      java: '.java-view/models.java',
+      java: '.java-view/Models.java',
       engine: 'rules',
       generatedAt: '',
       lines: [],
@@ -30,7 +30,7 @@ test('buildSymbolIndex flattens every sidecar map under the output folder', () =
     });
     writeMap(root, '.java-view', {
       python: 'services/order_service.py',
-      java: '.java-view/services/order_service.java',
+      java: '.java-view/services/OrderService.java',
       engine: 'rules',
       generatedAt: '',
       lines: [],
@@ -44,7 +44,7 @@ test('buildSymbolIndex flattens every sidecar map under the output folder', () =
     assert.equal(index.length, 3);
     const total = index.find((s) => s.name === 'calculateTotal');
     assert.ok(total);
-    assert.equal(total!.javaFile, '.java-view/services/order_service.java');
+    assert.equal(total!.javaFile, '.java-view/services/OrderService.java');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -110,8 +110,8 @@ function classMap(javaRel: string, className: string): SourceMapFile {
 test('SymbolIndexCache reads once, then re-reads only what it is told changed', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-idxcache-'));
   try {
-    writeMap(root, '.java-view', classMap('a.java', 'Alpha'));
-    writeMap(root, '.java-view', classMap('pkg/b.java', 'Beta'));
+    writeMap(root, '.java-view', classMap('A.java', 'Alpha'));
+    writeMap(root, '.java-view', classMap('pkg/B.java', 'Beta'));
     const cache = new SymbolIndexCache(root, '.java-view');
     const names = async () => (await cache.get()).map((s) => s.name).sort();
 
@@ -121,19 +121,19 @@ test('SymbolIndexCache reads once, then re-reads only what it is told changed', 
     assert.equal(await cache.get(), first, 'an unchanged index is served from memory');
 
     // Rewrite both maps but only report one: the unreported one must not be re-read.
-    writeMap(root, '.java-view', classMap('a.java', 'AlphaV2'));
-    writeMap(root, '.java-view', classMap('pkg/b.java', 'BetaV2'));
+    writeMap(root, '.java-view', classMap('A.java', 'AlphaV2'));
+    writeMap(root, '.java-view', classMap('pkg/B.java', 'BetaV2'));
     cache.invalidatePython('a.py');
     assert.deepEqual(await names(), ['AlphaV2', 'Beta']);
 
     // A deleted map disappears from the index.
-    const bMap = path.join(cache.mapsRoot, 'pkg', 'b.java.json');
+    const bMap = path.join(cache.mapsRoot, 'pkg', 'B.java.json');
     fs.rmSync(bMap);
     cache.invalidateMap(bMap);
     assert.deepEqual(await names(), ['AlphaV2']);
 
     // A full invalidation picks up files nobody reported.
-    writeMap(root, '.java-view', classMap('c.java', 'Gamma'));
+    writeMap(root, '.java-view', classMap('C.java', 'Gamma'));
     cache.invalidateAll();
     assert.deepEqual(await names(), ['AlphaV2', 'Gamma']);
   } finally {
@@ -144,10 +144,10 @@ test('SymbolIndexCache reads once, then re-reads only what it is told changed', 
 test('SymbolIndexCache does not cache a build that raced with a change', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-idxrace-'));
   try {
-    writeMap(root, '.java-view', classMap('a.java', 'Alpha'));
+    writeMap(root, '.java-view', classMap('A.java', 'Alpha'));
     const cache = new SymbolIndexCache(root, '.java-view');
     const building = cache.get();
-    writeMap(root, '.java-view', classMap('a.java', 'AlphaV2'));
+    writeMap(root, '.java-view', classMap('A.java', 'AlphaV2'));
     cache.invalidatePython('a.py'); // arrives while the first build is still reading
     await building;
     assert.deepEqual((await cache.get()).map((s) => s.name), ['AlphaV2']);
@@ -161,7 +161,7 @@ test('SymbolIndexCache.stats reports files, declarations and errors for the stat
   try {
     writeMap(root, '.java-view', {
       python: 'models.py',
-      java: '.java-view/models.java',
+      java: '.java-view/Models.java',
       engine: 'rules',
       generatedAt: '2026-09-17T10:00:00.000Z',
       lines: [],
@@ -177,7 +177,7 @@ test('SymbolIndexCache.stats reports files, declarations and errors for the stat
     });
     writeMap(root, '.java-view', {
       python: 'broken.py',
-      java: '.java-view/broken.java',
+      java: '.java-view/Broken.java',
       engine: 'rules',
       generatedAt: '2026-09-17T11:00:00.000Z',
       lines: [],
@@ -187,7 +187,7 @@ test('SymbolIndexCache.stats reports files, declarations and errors for the stat
     });
     writeMap(root, '.java-view', {
       python: 'odd.py',
-      java: '.java-view/odd.java',
+      java: '.java-view/Odd.java',
       engine: 'rules',
       generatedAt: '2026-09-17T12:30:00.000Z',
       lines: [],
@@ -208,7 +208,7 @@ test('SymbolIndexCache.stats reports files, declarations and errors for the stat
     assert.equal(stats.lastGenerated?.toISOString(), '2026-09-17T12:30:00.000Z');
 
     // Stats follow the same incremental invalidation as the symbol index.
-    fs.rmSync(path.join(cache.mapsRoot, 'broken.java.json'));
+    fs.rmSync(path.join(cache.mapsRoot, 'Broken.java.json'));
     cache.invalidatePython('broken.py');
     const after = await cache.stats();
     assert.equal(after.files, 2);
@@ -229,7 +229,7 @@ test('the project-wide members.json is not mistaken for a per-file source map', 
   try {
     writeMap(root, '.java-view', {
       python: 'models.py',
-      java: '.java-view/models.java',
+      java: '.java-view/Models.java',
       engine: 'rules',
       generatedAt: '',
       lines: [],

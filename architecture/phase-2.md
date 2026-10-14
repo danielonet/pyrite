@@ -90,11 +90,18 @@ Code: `src/translator/imports/`
   mapped to their Python line, and unresolved names one `// No Java import
   found for: ...` comment. The source map and symbols are shifted to match.
 
-Not done yet: the rest of what keeps a view from compiling (module-level
-Python calls such as `logging.getLogger(__name__)`, a module class and a
-nested class with the same name, e.g. `OrderService.OrderService`, and file
-names that differ from the public class, e.g. `models.java` holding
-`Models`).
+Two layout rules of the rules engine (all modes) exist for the same goal:
+every view file is named after its public class (`Models.java`,
+`InventoryInit.java`), and a class named like its module (`class
+OrderService` in `order_service.py`) becomes the module's class instead of
+`OrderService.OrderService`, which Java rejects
+(`promoteModuleNamedClass` in `ruleTranslator.ts`; the project scan records it
+in `KnownMembers.classes` so imports name `pkg.OrderService`).
+
+Not done yet: the rest of what keeps a view from compiling, mainly Python
+left in expressions (`logging.getLogger(__name__)`, `Tuple.zip(...)`), and a
+promoted class extending another class of its own module (`class
+Point(Base)` with `Base` in `point.py` would extend its own nested class).
 
 Not done yet: choosing hard functions by anything smarter than the heuristics
 above, running the model on module-level statements (only `def` blocks are

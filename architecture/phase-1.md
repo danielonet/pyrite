@@ -7,11 +7,11 @@ at a glance, using Java syntax, before reviewing or steering an AI's changes.
 
 ```
 my-project/                          my-project/.java-view/
-├── main.py                          ├── main.java
+├── main.py                          ├── Main.java
 └── inventory/                       └── inventory/
-    ├── models.py            ==>         ├── models.java
+    ├── models.py            ==>         ├── Models.java
     └── services/                        └── services/
-        └── order_service.py                 └── order_service.java
+        └── order_service.py                 └── OrderService.java
 ```
 
 ## Engine

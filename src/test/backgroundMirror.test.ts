@@ -37,7 +37,7 @@ test('runMirrorInBackground translates the project on a worker thread and report
     assert.equal(summary.skipped, 1, 'the bare __init__.py is skipped');
     assert.equal(total, 7);
     assert.equal(seen[seen.length - 1], 6, 'the last file is always reported, even with throttling');
-    const java = fs.readFileSync(path.join(root, '.java-view', 'pkg', 'sub', 'mod_1.java'), 'utf8');
+    const java = fs.readFileSync(path.join(root, '.java-view', 'pkg', 'sub', 'Mod1.java'), 'utf8');
     assert.ok(java.includes('public static class Thing1'), java);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -100,8 +100,8 @@ test('subfolder scope: only that folder is read and translated, paths stay relat
     const run = runMirrorInBackground({ engine: 'rules', options: { root, subfolder: 'pkg/sub' } });
     const summary = await run.result;
     assert.equal(summary.files, 3);
-    assert.ok(fs.existsSync(path.join(root, '.java-view', 'pkg', 'sub', 'mod_1.java')));
-    assert.equal(fs.existsSync(path.join(root, '.java-view', 'pkg', 'mod_0.java')), false, 'files outside the subfolder are not translated');
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'pkg', 'sub', 'Mod1.java')));
+    assert.equal(fs.existsSync(path.join(root, '.java-view', 'pkg', 'Mod0.java')), false, 'files outside the subfolder are not translated');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -128,7 +128,7 @@ test('runMirrorInBackground falls back to in-process work when the worker script
     const summary = await run.result;
     assert.equal(summary.files, 3);
     assert.deepEqual(seen, [0, 1, 2, 3]);
-    assert.ok(fs.existsSync(path.join(root, '.java-view', 'pkg', 'mod_0.java')));
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'pkg', 'Mod0.java')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
