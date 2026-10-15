@@ -2,13 +2,13 @@
 /**
  * Command-line entry point, useful without VS Code (CI, quick experiments).
  *
- *   pyrite <project-root> [--out .java-view]
+ *   pyrite <project-root> [--out .java-view] [--package com.acme.shop]
  *   pyrite --file path/to/module.py            # print the Java view of one file to stdout
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { createTranslator, EngineName, JavadocMode, ollamaCacheFile } from './translator';
+import { basePackageFor, createTranslator, EngineName, JavadocMode, ollamaCacheFile } from './translator';
 import { DEFAULT_EXCLUDES, mirrorProject } from './mirror';
 
 const JAVADOC_MODES: JavadocMode[] = ['always', 'docstringOnly', 'none'];
@@ -17,6 +17,8 @@ interface Args {
   root?: string;
   file?: string;
   out: string;
+  /** Base package; unset means the project folder's name. */
+  basePackage?: string;
   engine: EngineName;
   ollamaUrl?: string;
   ollamaModel?: string;
@@ -34,6 +36,7 @@ function parseArgs(argv: string[]): Args {
     const a = argv[i];
     const next = () => argv[++i];
     if (a === '--out') args.out = next();
+    else if (a === '--package') args.basePackage = next();
     else if (a === '--file') args.file = next();
     else if (a === '--engine') {
       const value = next();
@@ -79,9 +82,11 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--engine rules|hybrid] [--quiet]
-  pyrite --file <module.py> [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120]
+  pyrite <project-root> [--out .java-view] [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--engine rules|hybrid] [--quiet]
+  pyrite --file <module.py> [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120]
 
+  --out <folder>        Output folder; laid out as a Java project (src/main/java, src/test/java).
+  --package <name>      Package every view starts with (default: the project folder's name).
   --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).
   --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).
   --line-width <n>      Wrap generated lines longer than n columns (default: 120, 0 = no wrapping).
@@ -101,7 +106,7 @@ async function main(): Promise<void> {
   if (args.file) {
     const abs = path.resolve(args.file);
     const source = fs.readFileSync(abs, 'utf8');
-    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode, lombokStyle: args.lombok, lineWidth: args.lineWidth });
+    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode, lombokStyle: args.lombok, lineWidth: args.lineWidth, basePackage: args.basePackage && basePackageFor(args.basePackage) });
     process.stdout.write(result.java);
     for (const w of result.warnings) console.error(`warning: ${w}`);
     return;
@@ -119,6 +124,7 @@ async function main(): Promise<void> {
   const summary = await mirrorProject(translator, {
     root,
     outputFolder: args.out,
+    basePackage: args.basePackage,
     exclude: DEFAULT_EXCLUDES,
     javadocMode: args.javadoc,
     documentTestCode: args.javadocTestCode,

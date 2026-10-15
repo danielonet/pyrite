@@ -3,14 +3,21 @@
  *
  * Pure Node (no vscode dependency) so it can be used from the CLI and tests.
  *
- *   <root>/app/services/order_service.py
- *     -> <root>/.java-view/app/services/order_service.java
- *     -> <root>/.java-view/.pyrite/maps/app/services/order_service.java.json   (source map)
+ * The view is laid out as a standard Maven/Gradle project. Every package starts with the
+ * project's name (its root folder, see `projectBasePackage`), followed by the Python folder path;
+ * test modules go to `src/test/java`, everything else to `src/main/java`:
+ *
+ *   <root>/app/services/order_service.py   (root folder "shop")
+ *     -> <root>/.java-view/src/main/java/shop/app/services/OrderService.java   (package shop.app.services)
+ *     -> <root>/.java-view/.pyrite/maps/src/main/java/shop/app/services/OrderService.java.json   (source map)
+ *   <root>/tests/test_order_service.py
+ *     -> <root>/.java-view/src/test/java/shop/tests/TestOrderService.java   (package shop.tests)
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { JavadocMode, KnownMembers, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath, javaModuleClass, pythonModuleKey } from './translator';
+import { JavadocMode, KnownMembers, SymbolInfo, TranslateResult, Translator, basePackageFor, isInitModule, javaFileBaseName, moduleClassName, packageFromPath, javaModuleClass, pythonModuleKey } from './translator';
+import { isTestFile } from './translator/rules/javadoc';
 import { knownMembersOf, mergeKnownMembers } from './translator/rules/members';
 import { checkSyntax } from './parser/pythonParser';
 import { splitLogicalLines } from './translator/rules/logicalLines';
@@ -36,6 +43,8 @@ export interface MirrorOptions {
   lombokStyle?: boolean;
   /** Maximum line length of the generated Java; 0 disables wrapping (default 120). See `TranslateInput.lineWidth`. */
   lineWidth?: number;
+  /** Package every view sits under; blank or omitted takes the root folder's name (see `projectBasePackage`). */
+  basePackage?: string;
   /** Progress callback: called once per file with the relative path and index. */
   onProgress?: (relativePath: string, index: number, total: number) => void;
   /** Cooperative cancellation. */
@@ -91,6 +100,21 @@ export const DEFAULT_EXCLUDES = [
 ];
 
 export const MAP_DIR = '.pyrite/maps';
+
+/** Where production modules go inside the output folder, as in a Maven/Gradle project. */
+export const MAIN_SOURCES = 'src/main/java';
+
+/** Where test modules (see `isTestFile`) go inside the output folder. */
+export const TEST_SOURCES = 'src/test/java';
+
+/**
+ * The package every view of the project at `root` sits under: `configured` when it is set
+ * (e.g. `com.acme.shop`), otherwise the root folder's name (`sample-python-project` ->
+ * `sample_python_project`). Either way made a valid, lowercase Java package name.
+ */
+export function projectBasePackage(root: string, configured?: string): string {
+  return basePackageFor(configured?.trim() || path.basename(path.resolve(root))) || 'project';
+}
 
 /** Minimal glob matcher supporting `**`, `*` and `?` against forward-slash paths. */
 export function globToRegExp(glob: string): RegExp {
@@ -211,18 +235,21 @@ export function listPythonFiles(root: string, exclude: string[] = DEFAULT_EXCLUD
 }
 
 /**
- * Java view path for a Python file, named after the module's public class as `javac` requires:
- * `app/order_service.py` -> `app/OrderService.java`. A package module takes an `Init` suffix,
- * `app/inventory/__init__.py` -> `app/inventory/InventoryInit.java`, which hints at the
- * `__init__.py` origin and keeps it apart from a sibling `inventory.py` -> `Inventory.java`.
+ * Java view path for a Python file, relative to the output folder. It sits in the source root of
+ * a standard Java project (`src/test/java` for test code, `src/main/java` otherwise), in the folder
+ * of its package (see `packageFromPath`), named after the module's public class as `javac` requires:
+ * `app/order_service.py` -> `src/main/java/<base>/app/OrderService.java`. A package module takes an
+ * `Init` suffix, `app/inventory/__init__.py` -> `.../app/inventory/InventoryInit.java`, which hints at
+ * the `__init__.py` origin and keeps it apart from a sibling `inventory.py` -> `Inventory.java`.
  */
-export function javaPathFor(relativePython: string): string {
-  const dir = relativePython.slice(0, relativePython.lastIndexOf('/') + 1);
-  return `${dir}${javaFileBaseName(relativePython)}.java`;
+export function javaPathFor(relativePython: string, basePackage: string): string {
+  const sourceRoot = isTestFile(relativePython) ? TEST_SOURCES : MAIN_SOURCES;
+  const pkg = packageFromPath(relativePython, basePackage);
+  return `${sourceRoot}/${pkg ? `${pkg.replace(/\./g, '/')}/` : ''}${javaFileBaseName(relativePython)}.java`;
 }
 
-export function mapPathFor(relativePython: string): string {
-  return `${MAP_DIR}/${javaPathFor(relativePython)}.json`;
+export function mapPathFor(relativePython: string, basePackage: string): string {
+  return `${MAP_DIR}/${javaPathFor(relativePython, basePackage)}.json`;
 }
 
 /**
@@ -252,6 +279,8 @@ export interface MirrorFileOptions {
   documentTestCode?: boolean;
   lombokStyle?: boolean;
   lineWidth?: number;
+  /** Package every view sits under; blank or omitted takes the root folder's name (see `projectBasePackage`). */
+  basePackage?: string;
   /** Project-wide declarations; when omitted, the `members.json` a previous project run left behind is used. */
   knownMembers?: KnownMembers;
 }
@@ -274,14 +303,14 @@ function readMembersFile(root: string, outputFolder: string): KnownMembers | und
  * Scan every listed file for what it declares and merge the results, so each translation
  * can see properties, attribute names and typed signatures from the rest of the project.
  */
-export async function scanProjectMembers(root: string, files: string[], isCancelled?: () => boolean): Promise<KnownMembers> {
+export async function scanProjectMembers(root: string, files: string[], isCancelled?: () => boolean, basePackage = projectBasePackage(root)): Promise<KnownMembers> {
   const parts: KnownMembers[] = [];
   for (const rel of files) {
     if (isCancelled?.()) break;
     await yieldToEventLoop();
     try {
       const source = await fs.promises.readFile(path.join(root, rel), 'utf8');
-      const moduleClass = javaModuleClass(rel);
+      const moduleClass = javaModuleClass(rel, basePackage);
       // Top-level classes become classes nested in the module's class, except one named like the
       // module, which becomes the module's class itself (see promoteModuleNamedClass).
       const simple = moduleClass.split('.').pop();
@@ -302,21 +331,22 @@ export type MirrorFileOutcome =
 /** Translate one Python file and write its Java view + source map. Returns the absolute Java path, or `skipped` for a bare package marker. */
 export async function mirrorFile(translator: Translator, root: string, relativePython: string, options: MirrorFileOptions = {}): Promise<MirrorFileOutcome> {
   const outputFolder = options.outputFolder ?? '.java-view';
+  const basePackage = projectBasePackage(root, options.basePackage);
   const pyAbs = path.join(root, relativePython);
   const source = fs.readFileSync(pyAbs, 'utf8');
   if (isPackageMarkerOnly(relativePython, source)) {
-    removeMirroredFile(root, relativePython, outputFolder);
+    removeMirroredFile(root, relativePython, outputFolder, basePackage);
     return { skipped: true };
   }
-  // Earlier versions wrote views under other names; drop those so they don't linger next to the current file.
-  removeLegacyViews(root, relativePython, outputFolder);
+  // Earlier versions wrote views under other names and folders; drop those so they don't linger beside the current file.
+  removeLegacyViews(root, relativePython, outputFolder, basePackage);
   let result: TranslateResult;
   const knownMembers = options.knownMembers ?? readMembersFile(root, outputFolder);
   try {
-    result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, knownMembers });
+    result = await translator.translate({ source, relativePath: relativePython, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, basePackage, knownMembers });
   } catch (err) {
     // Never leave the previous view in place: a reader would take outdated code for current.
-    writeView(root, relativePython, outputFolder, failureView(relativePython, translator.name, err), [], [], translator.name, 'failed', [`${relativePython}: translation failed: ${err instanceof Error ? err.message : String(err)}`]);
+    writeView(root, relativePython, outputFolder, basePackage, failureView(relativePython, translator.name, err, basePackage), [], [], translator.name, 'failed', [`${relativePython}: translation failed: ${err instanceof Error ? err.message : String(err)}`]);
     throw err;
   }
   // A file that does not even parse still gets a view (the rules engine is line-based and
@@ -333,7 +363,7 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     result = prependLines(result, header);
     result.warnings.push(`${relativePython}:${issues[0].line}: Python syntax error (${issues[0].message}); the Java view is flagged`);
   }
-  const javaAbs = writeView(root, relativePython, outputFolder, result.java, result.sourceMap, result.symbols, result.engine, issues.length ? 'syntax' : 'ok', result.warnings);
+  const javaAbs = writeView(root, relativePython, outputFolder, basePackage, result.java, result.sourceMap, result.symbols, result.engine, issues.length ? 'syntax' : 'ok', result.warnings);
   return { skipped: false, javaAbs, result };
 }
 
@@ -352,6 +382,7 @@ function writeView(
   root: string,
   relativePython: string,
   outputFolder: string,
+  basePackage: string,
   java: string,
   lines: number[],
   symbols: SymbolInfo[],
@@ -360,12 +391,12 @@ function writeView(
   warnings: string[] = [],
 ): string {
   const outRoot = path.join(root, outputFolder);
-  const javaRel = javaPathFor(relativePython);
+  const javaRel = javaPathFor(relativePython, basePackage);
   const javaAbs = path.join(outRoot, javaRel);
   fs.mkdirSync(path.dirname(javaAbs), { recursive: true });
   fs.writeFileSync(javaAbs, java, 'utf8');
   const map: SourceMapFile = { python: relativePython, java: `${outputFolder}/${javaRel}`, engine, generatedAt: new Date().toISOString(), lines, symbols, status, warnings: warnings.length, warningMessages: warnings };
-  const mapAbs = path.join(outRoot, mapPathFor(relativePython));
+  const mapAbs = path.join(outRoot, mapPathFor(relativePython, basePackage));
   fs.mkdirSync(path.dirname(mapAbs), { recursive: true });
   fs.writeFileSync(mapAbs, JSON.stringify(map), 'utf8');
   return javaAbs;
@@ -375,9 +406,9 @@ function writeView(
 export const FAILURE_MARKER = 'TRANSLATION FAILED';
 
 /** The Java view written for a file the translator could not handle: says so instead of showing stale code. */
-export function failureView(relativePython: string, engine: string, err: unknown): string {
+export function failureView(relativePython: string, engine: string, err: unknown, basePackage = ''): string {
   const message = (err instanceof Error ? err.message : String(err)).replace(/\*\//g, '*&#47;').split('\n')[0];
-  const pkg = packageFromPath(relativePython);
+  const pkg = packageFromPath(relativePython, basePackage);
   return [
     `// Java view of ${relativePython}`,
     `// Generated by Pyrite (${engine} engine). Read-only reading aid: edit the Python source instead.`,
@@ -395,37 +426,54 @@ export function failureView(relativePython: string, engine: string, err: unknown
 }
 
 /**
- * Remove every Java view + map under a deleted Python folder (relative to root, forward slashes).
- * Nothing happens when the folder had no mirrored files.
+ * Remove every Java view + map under a deleted Python folder (relative to root, forward slashes),
+ * in both the main and the test source roots. Nothing happens when the folder had no mirrored files.
  */
-export function removeMirroredFolder(root: string, relativeDir: string, outputFolder = '.java-view'): void {
+export function removeMirroredFolder(root: string, relativeDir: string, outputFolder = '.java-view', basePackage = projectBasePackage(root)): void {
   const dir = relativeDir.replace(/\/+$/, '');
   if (!dir || dir === '.' || dir.startsWith('..')) return;
   const outRoot = path.join(root, outputFolder);
-  for (const rel of [dir, `${MAP_DIR}/${dir}`]) {
-    const abs = path.join(outRoot, rel);
-    if (fs.existsSync(abs)) fs.rmSync(abs, { recursive: true, force: true });
+  // The package folder of a module directly inside `dir`.
+  const pkgDir = packageFromPath(`${dir}/x.py`, basePackage).replace(/\./g, '/');
+  for (const sourceRoot of [MAIN_SOURCES, TEST_SOURCES]) {
+    for (const rel of [`${sourceRoot}/${pkgDir}`, `${MAP_DIR}/${sourceRoot}/${pkgDir}`]) {
+      const abs = path.join(outRoot, rel);
+      if (fs.existsSync(abs)) fs.rmSync(abs, { recursive: true, force: true });
+    }
   }
 }
 
 /** Remove the Java view + map for a deleted Python file. */
-export function removeMirroredFile(root: string, relativePython: string, outputFolder = '.java-view'): void {
+export function removeMirroredFile(root: string, relativePython: string, outputFolder = '.java-view', basePackage = projectBasePackage(root)): void {
   const outRoot = path.join(root, outputFolder);
-  for (const rel of [javaPathFor(relativePython), mapPathFor(relativePython)]) {
-    const abs = path.join(outRoot, rel);
-    if (fs.existsSync(abs)) fs.rmSync(abs);
+  for (const rel of [javaPathFor(relativePython, basePackage), mapPathFor(relativePython, basePackage)]) {
+    removeFileAndEmptyParents(path.join(outRoot, rel), outRoot);
   }
-  removeLegacyViews(root, relativePython, outputFolder);
+  removeLegacyViews(root, relativePython, outputFolder, basePackage);
 }
 
-/** Remove the views + maps earlier versions of Pyrite wrote for this module under other names. */
-function removeLegacyViews(root: string, relativePython: string, outputFolder: string): void {
+/** Delete a file if it exists, then each parent folder it leaves empty, up to (not including) `stopAt`. */
+function removeFileAndEmptyParents(abs: string, stopAt: string): void {
+  if (!fs.existsSync(abs)) return;
+  fs.rmSync(abs);
+  for (let dir = path.dirname(abs); dir.startsWith(stopAt + path.sep); dir = path.dirname(dir)) {
+    try {
+      fs.rmdirSync(dir); // fails, and so stops the walk, once a folder still holds something
+    } catch {
+      return;
+    }
+  }
+}
+
+/** Remove the views + maps earlier versions of Pyrite wrote for this module under other names and folders. */
+function removeLegacyViews(root: string, relativePython: string, outputFolder: string, basePackage: string): void {
   const outRoot = path.join(root, outputFolder);
   const dir = relativePython.slice(0, relativePython.lastIndexOf('/') + 1);
-  const current = javaPathFor(relativePython);
-  // Earlier versions kept the Python file's name (`order_service.java`, `inventoryInit.java`);
+  const current = javaPathFor(relativePython, basePackage);
+  // Before the Maven layout, views mirrored the Python folders directly (`app/OrderService.java`).
+  // Earlier still they kept the Python file's name (`order_service.java`, `inventoryInit.java`);
   // package modules were once `__init__.java`, `Inventory.java` and `InventoryPackage.java` too.
-  const legacy = [relativePython.replace(/\.py$/, '.java')];
+  const legacy = [`${dir}${javaFileBaseName(relativePython)}.java`, relativePython.replace(/\.py$/, '.java')];
   if (isInitModule(relativePython)) {
     const folderClass = moduleClassName(relativePython).replace(/Init$/, '');
     legacy.push(`${dir}${folderClass.charAt(0).toLowerCase()}${folderClass.slice(1)}Init.java`, `${dir}${folderClass}.java`, `${dir}${folderClass}Package.java`);
@@ -434,20 +482,18 @@ function removeLegacyViews(root: string, relativePython: string, outputFolder: s
     // On a case-insensitive filesystem `order_service.java` is never `OrderService.java`, but
     // `models.java` is `Models.java`: it is removed here and written again right after.
     if (javaRel === current) continue;
-    for (const rel of [javaRel, `${MAP_DIR}/${javaRel}.json`]) {
-      const abs = path.join(outRoot, rel);
-      if (fs.existsSync(abs)) fs.rmSync(abs);
-    }
+    for (const rel of [javaRel, `${MAP_DIR}/${javaRel}.json`]) removeFileAndEmptyParents(path.join(outRoot, rel), outRoot);
   }
 }
 
 export async function mirrorProject(translator: Translator, options: MirrorOptions): Promise<MirrorSummary> {
   const outputFolder = options.outputFolder ?? '.java-view';
   const exclude = options.exclude ?? DEFAULT_EXCLUDES;
+  const basePackage = projectBasePackage(options.root, options.basePackage);
   const files = await listPythonFilesAsync(options.root, exclude, options.isCancelled, options.subfolder);
   const outputRoot = path.join(options.root, outputFolder);
   // Cross-file knowledge: a full run scans the whole project; a subfolder run refreshes its part on top of the last full scan.
-  const scanned = await scanProjectMembers(options.root, files, options.isCancelled);
+  const scanned = await scanProjectMembers(options.root, files, options.isCancelled, basePackage);
   const previous = options.subfolder ? readMembersFile(options.root, outputFolder) : undefined;
   const knownMembers = previous ? mergeKnownMembers([previous, scanned]) : scanned;
   await fs.promises.mkdir(path.join(outputRoot, MAP_DIR), { recursive: true });
@@ -461,7 +507,7 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
     if (options.isCancelled?.()) break;
     options.onProgress?.(rel, index, files.length);
     try {
-      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, knownMembers });
+      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, basePackage, knownMembers });
       if (outcome.skipped) {
         skipped += 1;
         continue;
@@ -473,7 +519,7 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
     }
   }
   await fs.promises.mkdir(outputRoot, { recursive: true });
-  await fs.promises.writeFile(path.join(outputRoot, 'README.md'), readmeText(outputFolder, translator.name), 'utf8');
+  await fs.promises.writeFile(path.join(outputRoot, 'README.md'), readmeText(outputFolder, translator.name, basePackage), 'utf8');
   await fs.promises.writeFile(path.join(outputRoot, '.gitignore'), '# Generated by Pyrite - do not commit.\n*\n', 'utf8');
   return { files: count, cancelled: options.isCancelled?.() ?? false, skipped, warnings, outputRoot, engine: translator.name };
 }
@@ -515,7 +561,7 @@ export function javaLineFor(map: SourceMapFile, pythonLine: number): number {
   return best < 0 ? 0 : best;
 }
 
-function readmeText(outputFolder: string, engine: string): string {
+function readmeText(outputFolder: string, engine: string, basePackage: string): string {
   return `# Java view (generated)
 
 This folder mirrors the Python sources of this workspace as Java-flavored files
@@ -524,15 +570,19 @@ so that Java developers can read and review them. It was generated by the
 
 - **Do not edit these files.** They are overwritten on every save of the Python source.
   Edit the \`.py\` file instead (use *Pyrite: Go to Python Source*, Ctrl+Alt+J).
+- The layout is a standard Maven/Gradle project: test modules (\`test_*.py\`, \`*_test.py\`, \`conftest.py\`,
+  anything under a \`test\`/\`tests\` folder) are in \`src/test/java\`, everything else in \`src/main/java\`.
+- Every package starts with \`${basePackage}\` (the project's name), followed by the Python folder path:
+  \`inventory/models.py\` -> \`src/main/java/${basePackage.replace(/\./g, '/')}/inventory/Models.java\`, \`package ${basePackage}.inventory;\`.
 - The code is a *reading aid*: it keeps Python names and structure and is not meant to compile.
 - Constructs without a Java equivalent are kept and annotated with \`/* ... */\` comments.
 - A file the translator could not handle gets a placeholder marked \`TRANSLATION FAILED\` with the
   reason, never an outdated view of an earlier version.
 - An \`__init__.py\` that only marks a package (docstring, comments, \`__all__\`) gets no Java file:
   Java packages are plain folders. One with real content (constants, re-exports, setup code) is mirrored
-  as a class named after its folder, e.g. \`inventory/__init__.py\` -> \`public final class Inventory\`;
-  its Javadoc names the original file. The file itself is named in lowerCamelCase with an \`Init\`
-  suffix (\`inventory/inventoryInit.java\`), hinting at \`__init__.py\` and keeping it from colliding
+  as a class named after its folder, e.g. \`inventory/__init__.py\` -> \`public final class InventoryInit\`;
+  its Javadoc names the original file. Class and file take an \`Init\` suffix
+  (\`inventory/InventoryInit.java\`), hinting at \`__init__.py\` and keeping it from colliding
   with a sibling \`inventory.py\` on Windows/macOS, where file names are case-insensitive.
 - \`${outputFolder}/.pyrite/maps/\` holds line maps used for navigation between the two views.
 `;

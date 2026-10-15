@@ -2,7 +2,7 @@
   "name": "pyrite",
   "displayName": "Pyrite",
   "description": "Read Python as if it were Java: mirrors a Python project into a read-only, Java-flavored view for Java developers.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "danielonnet",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -180,7 +180,12 @@
         "pyrite.outputFolder": {
           "type": "string",
           "default": ".java-view",
-          "description": "Folder (relative to the workspace root) where the mirrored Java view is written."
+          "description": "Folder (relative to the workspace root) where the mirrored Java view is written, laid out as a standard Java project: src/main/java for production code, src/test/java for test code."
+        },
+        "pyrite.basePackage": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Package every Java view starts with, followed by the Python folder path: with `com.acme.shop`, `inventory/models.py` becomes `com.acme.shop.inventory.Models` in `src/main/java/com/acme/shop/inventory/Models.java`. Leave empty to use the workspace folder's name (`sample-python-project` -> `sample_python_project`)."
         },
         "pyrite.exclude": {
           "type": "array",

@@ -84,9 +84,11 @@ function walk(dir: string, out: string[], skip: RegExp): void {
 // ------------------------------------------------------------------ snapshot
 
 test('snapshot: the sample project translates exactly as recorded', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-snapshot-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-snapshot-'));
+  // Mirrored under its own name, so its views are in package sample_python_project.
+  const root = path.join(tmp, 'sample-python-project');
   try {
-    fs.cpSync(SAMPLE, path.join(root, 'sample-python-project'), { recursive: true });
+    fs.cpSync(SAMPLE, root, { recursive: true });
     const { translator } = createTranslator({ engine: 'rules' });
     const summary = await mirrorProject(translator, { root, lombokStyle: true });
     assert.deepEqual(summary.warnings, []);
@@ -98,7 +100,7 @@ test('snapshot: the sample project translates exactly as recorded', async () => 
         else if (e.name.endsWith('.java')) produced.push(abs);
       }
     };
-    collect(path.join(root, '.java-view', 'sample-python-project'));
+    collect(path.join(root, '.java-view'));
     assert.ok(produced.length >= 8, `expected the sample project's views, got ${produced.length}`);
     const tooWide = produced.flatMap((abs) =>
       fs.readFileSync(abs, 'utf8').split('\n').map((line, i) => ({ line, i })).filter(({ line }) => line.length > 120).map(({ line, i }) => `${path.basename(abs)}:${i + 1}: ${line.length} columns`),
@@ -108,7 +110,7 @@ test('snapshot: the sample project translates exactly as recorded', async () => 
     const update = Boolean(process.env.UPDATE_SNAPSHOTS);
     const mismatches: string[] = [];
     for (const abs of produced.sort()) {
-      const rel = path.relative(path.join(root, '.java-view', 'sample-python-project'), abs);
+      const rel = path.relative(path.join(root, '.java-view'), abs);
       const snapshot = path.join(SNAPSHOTS, rel);
       const actual = fs.readFileSync(abs, 'utf8');
       if (update) {
@@ -130,7 +132,7 @@ test('snapshot: the sample project translates exactly as recorded', async () => 
     }
     assert.deepEqual(mismatches, [], `snapshots differ (run UPDATE_SNAPSHOTS=1 npm test after reviewing the change):\n${mismatches.join('\n')}`);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 

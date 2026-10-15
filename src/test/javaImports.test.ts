@@ -165,10 +165,20 @@ test('the project scan records each module class and its top-level classes', asy
   const { scanProjectMembers } = await import('../mirror');
   const root = require('path').join(__dirname, '..', '..', 'sample-python-project');
   const known = await scanProjectMembers(root, ['inventory/models.py', 'inventory/utils/formatting.py', 'inventory/__init__.py']);
-  assert.equal(known.modules?.['inventory.models'], 'inventory.Models');
-  assert.equal(known.modules?.['inventory.utils.formatting'], 'inventory.utils.Formatting');
-  assert.equal(known.modules?.['inventory'], 'inventory.InventoryInit');
-  assert.equal(known.classes?.Order, 'inventory.Models.Order');
+  // Python module names stay as Python writes them; the Java classes are under the project's package.
+  assert.equal(known.modules?.['inventory.models'], 'sample_python_project.inventory.Models');
+  assert.equal(known.modules?.['inventory.utils.formatting'], 'sample_python_project.inventory.utils.Formatting');
+  assert.equal(known.modules?.['inventory'], 'sample_python_project.inventory.InventoryInit');
+  assert.equal(known.classes?.Order, 'sample_python_project.inventory.Models.Order');
+});
+
+test('imports the rules prefixed with the base package still resolve to project classes', async () => {
+  const source = 'from .models import Order\n\ndef make() -> Order:\n    return Order()\n';
+  const knownMembers = { properties: {}, attributes: [], returnTypes: {}, fieldTypes: {}, modules: { 'app.models': 'shop.app.Models' } };
+  const rules = await new RuleBasedTranslator().translate({ source, relativePath: 'app/main.py', basePackage: 'shop', knownMembers });
+  assert.ok(rules.java.includes('import shop.app.models.Order;'), rules.java);
+  const plan = planImports(rules, source, knownMembers.modules, {}, 'shop');
+  assert.deepEqual(plan.project, ['shop.app.Models.Order']);
 });
 
 test('a class named like its module is imported as the module class itself', async () => {

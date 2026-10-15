@@ -11,8 +11,18 @@ import { splitLogicalLines } from '../translator/rules/logicalLines';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { FAILURE_MARKER, globToRegExp, isExcluded, isPackageMarkerOnly, javaLineFor, javaPathFor, mirrorFile, pythonLineFor, removeMirroredFolder } from '../mirror';
-import { Translator, createTranslator, moduleClassName } from '../translator';
+import { FAILURE_MARKER, globToRegExp, isExcluded, isPackageMarkerOnly, javaLineFor, javaPathFor, mirrorFile, mirrorProject, projectBasePackage, pythonLineFor, removeMirroredFile, removeMirroredFolder } from '../mirror';
+import { Translator, basePackageFor, createTranslator, moduleClassName, packageFromPath } from '../translator';
+
+/** Absolute path in the main source root of the view of a project at `root` (package = its folder name). */
+function mainView(root: string, ...parts: string[]): string {
+  return path.join(root, '.java-view', 'src', 'main', 'java', ...projectBasePackage(root).split('.'), ...parts);
+}
+
+/** Same, for the sidecar map of a view in the main source root. */
+function mainMap(root: string, ...parts: string[]): string {
+  return path.join(root, '.java-view', '.pyrite', 'maps', 'src', 'main', 'java', ...projectBasePackage(root).split('.'), ...parts);
+}
 
 function java(source: string, relativePath = 'pkg/mod.py'): string {
   return translateWithRules({ source, relativePath }).java;
@@ -519,21 +529,23 @@ test('mirrorFile skips a bare __init__.py and removes its stale Java view', asyn
     fs.writeFileSync(init, '__version__ = "1.0"\n', 'utf8');
     const first = await mirrorFile(translator, root, 'pkg/__init__.py');
     assert.equal(first.skipped, false);
-    const javaAbs = path.join(root, '.java-view', 'pkg', 'PkgInit.java');
+    const javaAbs = mainView(root, 'pkg', 'PkgInit.java');
     assert.ok(fs.existsSync(javaAbs));
     contains(fs.readFileSync(javaAbs, 'utf8'), 'public final class PkgInit {');
-    // Leftovers from the names earlier versions used are cleaned up too.
-    const legacy = ['__init__.java', 'Pkg.java', 'PkgPackage.java', 'pkgInit.java'].map((n) => path.join(root, '.java-view', 'pkg', n));
+    // Leftovers from the names and the flat layout earlier versions used are cleaned up too.
+    const legacy = ['__init__.java', 'Pkg.java', 'PkgPackage.java', 'pkgInit.java', 'PkgInit.java'].map((n) => path.join(root, '.java-view', 'pkg', n));
+    fs.mkdirSync(path.join(root, '.java-view', 'pkg'), { recursive: true });
     for (const abs of legacy) fs.writeFileSync(abs, '// stale', 'utf8');
     await mirrorFile(translator, root, 'pkg/__init__.py');
     for (const abs of legacy) assert.equal(fs.existsSync(abs), false, `legacy ${path.basename(abs)} should be removed`);
+    assert.equal(fs.existsSync(path.join(root, '.java-view', 'pkg')), false, 'the emptied legacy folder is removed');
     assert.ok(fs.existsSync(javaAbs), 'the current view must survive the cleanup');
 
     fs.writeFileSync(init, '\"\"\"Just a package.\"\"\"\n', 'utf8');
     const second = await mirrorFile(translator, root, 'pkg/__init__.py');
     assert.equal(second.skipped, true);
     assert.equal(fs.existsSync(javaAbs), false, 'stale Java view should be removed');
-    assert.equal(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'PkgInit.java.json')), false, 'stale map should be removed');
+    assert.equal(fs.existsSync(mainMap(root, 'pkg', 'PkgInit.java.json')), false, 'stale map should be removed');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -544,14 +556,14 @@ test('package module: named after its folder, Javadoc names the original __init_
   assert.equal(moduleClassName('app/order_service.py'), 'OrderService');
   assert.equal(moduleClassName('__init__.py'), 'Init');
   // A view file is named after its public class, as javac requires.
-  assert.equal(javaPathFor('app/inventory/__init__.py'), 'app/inventory/InventoryInit.java');
-  assert.equal(javaPathFor('app/order_items/__init__.py'), 'app/order_items/OrderItemsInit.java');
+  assert.equal(javaPathFor('app/inventory/__init__.py', 'shop'), 'src/main/java/shop/app/inventory/InventoryInit.java');
+  assert.equal(javaPathFor('app/order_items/__init__.py', 'shop'), 'src/main/java/shop/app/order_items/OrderItemsInit.java');
   assert.equal(moduleClassName('app/order_items/__init__.py'), 'OrderItemsInit');
-  assert.equal(javaPathFor('app/order_service.py'), 'app/OrderService.java');
+  assert.equal(javaPathFor('app/order_service.py', 'shop'), 'src/main/java/shop/app/OrderService.java');
   // The Init suffix keeps the package module apart from a sibling module of the same name.
   assert.notEqual(
-    javaPathFor('app/inventory/__init__.py').toLowerCase(),
-    javaPathFor('app/inventory/inventory.py').toLowerCase(),
+    javaPathFor('app/inventory/__init__.py', 'shop').toLowerCase(),
+    javaPathFor('app/inventory/inventory.py', 'shop').toLowerCase(),
   );
 
   const src = '\"\"\"Inventory domain package.\"\"\"\n__version__ = "0.1.0"\n';
@@ -672,7 +684,7 @@ test('a failed translation writes a placeholder view instead of leaving the old 
     const { translator } = createTranslator({ engine: 'rules' });
     const first = await mirrorFile(translator, root, 'pkg/mod.py');
     assert.equal(first.skipped, false);
-    const javaAbs = path.join(root, '.java-view', 'pkg', 'Mod.java');
+    const javaAbs = mainView(root, 'pkg', 'Mod.java');
     contains(fs.readFileSync(javaAbs, 'utf8'), 'static int x = 1;');
 
     const broken: Translator = { name: 'rules', translate: async () => { throw new Error('boom on line 3'); } };
@@ -680,14 +692,104 @@ test('a failed translation writes a placeholder view instead of leaving the old 
     const view = fs.readFileSync(javaAbs, 'utf8');
     contains(view, FAILURE_MARKER);
     contains(view, 'boom on line 3');
-    contains(view, 'package pkg;');
+    contains(view, `package ${projectBasePackage(root)}.pkg;`);
     contains(view, 'public final class Mod {');
     assert.ok(!view.includes('static int x = 1;'), 'the stale code must be gone');
-    const map = JSON.parse(fs.readFileSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'Mod.java.json'), 'utf8'));
+    const map = JSON.parse(fs.readFileSync(mainMap(root, 'pkg', 'Mod.java.json'), 'utf8'));
     assert.deepEqual(map.symbols, []);
     assert.deepEqual(map.lines, []);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('package names: the project name, then the Python folders, made valid for Java', () => {
+  assert.equal(basePackageFor('sample-python-project'), 'sample_python_project');
+  assert.equal(basePackageFor('My Shop'), 'my_shop');
+  assert.equal(basePackageFor('com.Acme.shop'), 'com.acme.shop');
+  assert.equal(basePackageFor('2fa'), '_2fa');
+  assert.equal(packageFromPath('app/services/x.py', 'shop'), 'shop.app.services');
+  assert.equal(packageFromPath('x.py', 'shop'), 'shop');
+  assert.equal(packageFromPath('app/static/x.py', 'shop'), 'shop.app.static_', 'a Java keyword is not a package segment');
+  assert.equal(projectBasePackage('/work/Order-Service'), 'order_service');
+  assert.equal(projectBasePackage('/work/Order-Service', ' com.acme '), 'com.acme', 'a configured base package wins');
+  assert.equal(projectBasePackage('/work/Order-Service', ''), 'order_service', 'blank means the folder name');
+});
+
+test('test modules go to src/test/java, the rest to src/main/java', () => {
+  assert.equal(javaPathFor('app/models.py', 'shop'), 'src/main/java/shop/app/Models.java');
+  assert.equal(javaPathFor('main.py', 'shop'), 'src/main/java/shop/Main.java');
+  assert.equal(javaPathFor('tests/test_models.py', 'shop'), 'src/test/java/shop/tests/TestModels.java');
+  assert.equal(javaPathFor('app/models_test.py', 'shop'), 'src/test/java/shop/app/ModelsTest.java');
+  assert.equal(javaPathFor('conftest.py', 'shop'), 'src/test/java/shop/Conftest.java');
+  assert.equal(javaPathFor('tests/helpers.py', 'com.acme'), 'src/test/java/com/acme/tests/Helpers.java');
+});
+
+test('the package line and the imports of project modules start with the base package', () => {
+  const source = 'import os\nfrom typing import List\nfrom .models import Order\nfrom ..util import fmt\nfrom app.repo import Repo\nimport app.db as db\n';
+  const knownMembers = { properties: {}, attributes: [], returnTypes: {}, fieldTypes: {}, modules: { 'app.repo': 'shop.app.Repo', 'app.db': 'shop.app.Db' } };
+  const out = translateWithRules({ source, relativePath: 'app/services/x.py', basePackage: 'shop', knownMembers }).java;
+  contains(out, 'package shop.app.services;');
+  contains(out, 'import shop.app.services.models.Order;');
+  contains(out, 'import shop.app.util.fmt;');
+  contains(out, 'import shop.app.repo.Repo;');
+  contains(out, 'import shop.app.db; // as db');
+  // Modules from outside the project are left alone.
+  contains(out, 'import os;');
+  contains(out, 'import typing.List;');
+  // Without a base package nothing changes.
+  contains(translateWithRules({ source, relativePath: 'app/services/x.py', knownMembers }).java, 'import app.services.models.Order;');
+});
+
+test('mirrorProject writes a standard Java project layout under the project name', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-layout-'));
+  const root = path.join(tmp, 'my-shop');
+  try {
+    fs.mkdirSync(path.join(root, 'app'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'tests'));
+    fs.writeFileSync(path.join(root, 'app', 'models.py'), 'class Order:\n    pass\n', 'utf8');
+    fs.writeFileSync(path.join(root, 'tests', 'test_models.py'), 'def test_order():\n    assert True\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    await mirrorProject(translator, { root });
+    const out = path.join(root, '.java-view');
+    const main = path.join(out, 'src', 'main', 'java', 'my_shop', 'app', 'Models.java');
+    const testView = path.join(out, 'src', 'test', 'java', 'my_shop', 'tests', 'TestModels.java');
+    contains(fs.readFileSync(main, 'utf8'), 'package my_shop.app;');
+    contains(fs.readFileSync(testView, 'utf8'), 'package my_shop.tests;');
+    assert.ok(fs.existsSync(path.join(out, '.pyrite', 'maps', 'src', 'test', 'java', 'my_shop', 'tests', 'TestModels.java.json')));
+
+    // A deleted module takes its view, its map and the folders it leaves empty with it.
+    removeMirroredFile(root, 'tests/test_models.py');
+    assert.equal(fs.existsSync(path.join(out, 'src', 'test')), false);
+    assert.ok(fs.existsSync(main));
+
+    // With a configured base package, the layout follows it.
+    await mirrorProject(translator, { root, basePackage: 'com.acme.shop' });
+    contains(fs.readFileSync(path.join(out, 'src', 'main', 'java', 'com', 'acme', 'shop', 'app', 'Models.java'), 'utf8'), 'package com.acme.shop.app;');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('removeMirroredFolder clears a folder from both source roots', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-rmboth-'));
+  const root = path.join(tmp, 'proj');
+  try {
+    fs.mkdirSync(path.join(root, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'app', 'a.py'), 'x = 1\n', 'utf8');
+    fs.writeFileSync(path.join(root, 'app', 'test_a.py'), 'y = 2\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    await mirrorFile(translator, root, 'app/a.py');
+    await mirrorFile(translator, root, 'app/test_a.py');
+    const out = path.join(root, '.java-view');
+    assert.ok(fs.existsSync(path.join(out, 'src', 'test', 'java', 'proj', 'app', 'TestA.java')));
+    removeMirroredFolder(root, 'app');
+    for (const sourceRoot of ['main', 'test']) {
+      assert.equal(fs.existsSync(path.join(out, 'src', sourceRoot, 'java', 'proj', 'app')), false);
+      assert.equal(fs.existsSync(path.join(out, '.pyrite', 'maps', 'src', sourceRoot, 'java', 'proj', 'app')), false);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
@@ -701,13 +803,13 @@ test('removeMirroredFolder deletes the mirrored subtree and its maps, and nothin
     await mirrorFile(translator, root, 'app/old/a.py');
     await mirrorFile(translator, root, 'app/keep.py');
     removeMirroredFolder(root, 'app/old/');
-    assert.equal(fs.existsSync(path.join(root, '.java-view', 'app', 'old')), false);
-    assert.equal(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'app', 'old')), false);
-    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'Keep.java')));
+    assert.equal(fs.existsSync(mainView(root, 'app', 'old')), false);
+    assert.equal(fs.existsSync(mainMap(root, 'app', 'old')), false);
+    assert.ok(fs.existsSync(mainView(root, 'app', 'Keep.java')));
     // Guard rails: never wipe the output root or escape it.
     removeMirroredFolder(root, '');
     removeMirroredFolder(root, '../elsewhere');
-    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'Keep.java')));
+    assert.ok(fs.existsSync(mainView(root, 'app', 'Keep.java')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -945,7 +1047,7 @@ test('cross-file knowledge: the project mirror scans every file first and leaves
     const { translator } = createTranslator({ engine: 'rules' });
     const { mirrorProject } = await import('../mirror');
     await mirrorProject(translator, { root });
-    const view = () => fs.readFileSync(path.join(root, '.java-view', 'app', 'Service.java'), 'utf8');
+    const view = () => fs.readFileSync(mainView(root, 'app', 'Service.java'), 'utf8');
     contains(view(), 'Order o = this.repo.order(1);');
     contains(view(), 'return this.repo.size();');
     assert.ok(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'members.json')));
@@ -1001,7 +1103,7 @@ test('a file with a Python syntax error is still translated but flagged at the t
     const { translator } = createTranslator({ engine: 'rules' });
     const outcome = await mirrorFile(translator, root, 'pkg/bad.py');
     assert.equal(outcome.skipped, false);
-    const view = fs.readFileSync(path.join(root, '.java-view', 'pkg', 'Bad.java'), 'utf8');
+    const view = fs.readFileSync(mainView(root, 'pkg', 'Bad.java'), 'utf8');
     contains(view, '// WARNING: pkg/bad.py has Python syntax errors');
     contains(view, 'line 4,');
     contains(view, 'public static Object ok() {');
@@ -1241,7 +1343,7 @@ test('each sidecar map records how its translation went, for the status bar repo
     fs.writeFileSync(path.join(root, 'pkg', 'ok.py'), 'class A:\n    def f(self):\n        return 1\n', 'utf8');
     fs.writeFileSync(path.join(root, 'pkg', 'bad.py'), 'def broken(:\n    pass\n', 'utf8');
     const { translator } = createTranslator({ engine: 'rules' });
-    const readMap = (name: string) => JSON.parse(fs.readFileSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', `${name}.java.json`), 'utf8'));
+    const readMap = (name: string) => JSON.parse(fs.readFileSync(mainMap(root, 'pkg', `${name}.java.json`), 'utf8'));
 
     await mirrorFile(translator, root, 'pkg/ok.py');
     assert.equal(readMap('Ok').status, 'ok');
@@ -1310,7 +1412,7 @@ test('a view left under the old file name is removed when the module is regenera
     }
     await mirrorFile(createTranslator({ engine: 'rules' }).translator, root, 'app/order_service.py');
     for (const abs of old) assert.equal(fs.existsSync(abs), false, `${abs} should be removed`);
-    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'OrderService.java')));
+    assert.ok(fs.existsSync(mainView(root, 'app', 'OrderService.java')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

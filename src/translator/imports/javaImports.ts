@@ -217,7 +217,7 @@ function importBlock(lines: string[]): [number, number] {
  * Work out the import block for a Java view: everything the rules and the JDK index can resolve
  * on their own, plus the names that are left for the model.
  */
-export function planImports(view: JavaView, pythonSource: string, modules: Record<string, string> = {}, projectClasses: Record<string, string> = {}): ImportPlan {
+export function planImports(view: JavaView, pythonSource: string, modules: Record<string, string> = {}, projectClasses: Record<string, string> = {}, basePackage = ''): ImportPlan {
   const lines = view.java.split('\n');
   const [start, end] = importBlock(lines);
   const pyLines = pythonSource.split(/\r?\n/);
@@ -236,7 +236,9 @@ export function planImports(view: JavaView, pythonSource: string, modules: Recor
     const imp = parseRulesImport(lines[i], py);
     if (!imp || !py) continue; // the rules' own `java.util.*` lines: replaced by explicit imports below
     pythonImportLines.add(py);
-    const mod = projectModule(imp.target, modules);
+    // The rules put the base package in front of the project's own modules; the module keys are Python's.
+    const unprefixed = basePackage && imp.target.startsWith(`${basePackage}.`) ? imp.target.slice(basePackage.length + 1) : '';
+    const mod = (unprefixed && projectModule(unprefixed, modules)) || projectModule(imp.target, modules);
     if (!mod) {
       pythonOnlyLines.add(py);
       continue;

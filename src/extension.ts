@@ -18,7 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { createTranslator, EngineName, JavadocMode, OllamaOptions, ollamaCacheFile, Translator } from './translator';
-import { javaLineFor, javaPathFor, mirrorFile, pythonLineFor, readSourceMap, removeMirroredFile, removeMirroredFolder, isExcluded } from './mirror';
+import { javaLineFor, javaPathFor, mirrorFile, projectBasePackage, pythonLineFor, readSourceMap, removeMirroredFile, removeMirroredFolder, isExcluded } from './mirror';
 import { runMirrorInBackground } from './backgroundMirror';
 import { SymbolIndexCache, ViewStats, resolveDefinition } from './definitionIndex';
 import { PyriteAboutViewProvider } from './aboutView';
@@ -47,6 +47,8 @@ function symbolIndexFor(root: vscode.WorkspaceFolder, outputFolder = settings().
 interface Settings {
   engine: EngineName;
   outputFolder: string;
+  /** `pyrite.basePackage` as configured; blank means the workspace folder's name (see `projectBasePackage`). */
+  basePackage: string;
   exclude: string[];
   watch: boolean;
   javadoc: JavadocMode;
@@ -65,6 +67,7 @@ function settings(): Settings {
   return {
     engine: cfg.get<EngineName>('engine', 'rules'),
     outputFolder: cfg.get<string>('outputFolder', '.java-view'),
+    basePackage: cfg.get<string>('basePackage', ''),
     exclude: cfg.get<string[]>('exclude', []),
     watch: cfg.get<boolean>('watch', true),
     javadoc: cfg.get<JavadocMode>('javadoc', 'docstringOnly'),
@@ -149,6 +152,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
           options: {
             root: root.uri.fsPath,
             outputFolder: s.outputFolder,
+            basePackage: s.basePackage,
             exclude: s.exclude,
             subfolder,
             javadocMode: s.javadoc,
@@ -204,8 +208,9 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   statusItem.text = STATUS_BUSY;
   statusItem.show();
   try {
-    const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth });
-    symbolIndexFor(root, s.outputFolder).invalidatePython(rel);
+    const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage);
+    const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, basePackage, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth });
+    symbolIndexFor(root, s.outputFolder).invalidatePython(rel, basePackage);
     void refreshStatusReport(pyUri);
     if (outcome.skipped) {
       // Only tell the user when they asked for this file explicitly, not on every watched save.
@@ -240,7 +245,7 @@ async function openJavaView(): Promise<void> {
   if (editor.document.isDirty) await editor.document.save();
   const s = settings();
   const rel = relPath(root, editor.document.uri.fsPath);
-  const javaAbs = path.join(root.uri.fsPath, s.outputFolder, javaPathFor(rel));
+  const javaAbs = path.join(root.uri.fsPath, s.outputFolder, javaPathFor(rel, projectBasePackage(root.uri.fsPath, s.basePackage)));
   const javaUri = fs.existsSync(javaAbs) ? vscode.Uri.file(javaAbs) : await translateOne(editor.document.uri, false);
   if (!javaUri) return;
   const map = readSourceMap(root.uri.fsPath, javaUri.fsPath, s.outputFolder);
@@ -569,12 +574,13 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!root || !settings().watch || isInsideOutput(root, uri.fsPath)) return;
       const rel = relPath(root, uri.fsPath);
       const s = settings();
+      const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage);
       if (rel.endsWith('.py')) {
-        removeMirroredFile(root.uri.fsPath, rel, s.outputFolder);
-        symbolIndexFor(root, s.outputFolder).invalidatePython(rel);
+        removeMirroredFile(root.uri.fsPath, rel, s.outputFolder, basePackage);
+        symbolIndexFor(root, s.outputFolder).invalidatePython(rel, basePackage);
       } else if (!path.extname(rel)) {
         // Probably a folder (it no longer exists, so it cannot be checked); harmless when nothing was mirrored there.
-        removeMirroredFolder(root.uri.fsPath, rel, s.outputFolder);
+        removeMirroredFolder(root.uri.fsPath, rel, s.outputFolder, basePackage);
         symbolIndexFor(root, s.outputFolder).invalidateAll();
       }
       void refreshStatusReport(uri);

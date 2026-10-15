@@ -55,6 +55,12 @@ export interface TranslateInput {
    * before `&&`, `||`, `?`, `+` and chained calls. 0 disables wrapping. Defaults to 120.
    */
   lineWidth?: number;
+  /**
+   * Package every view of the project sits under, normally the project's name (see
+   * `basePackageFor`): with `sample_project`, `app/models.py` is in `package sample_project.app`.
+   * Defaults to none, so the package is the folder path alone.
+   */
+  basePackage?: string;
 }
 
 export type SymbolKind = 'class' | 'method' | 'field';
@@ -158,10 +164,50 @@ export function javaFileBaseName(relativePath: string): string {
   return moduleClassName(relativePath);
 }
 
-/** Derive a Java package name from a relative file path. */
-export function packageFromPath(relativePath: string): string {
-  const parts = relativePath.split('/').slice(0, -1).filter((p) => p && p !== '.');
-  return parts.map((p) => p.replace(/[^A-Za-z0-9_]/g, '_')).join('.');
+/** Java's reserved words, which cannot be a package segment. */
+const JAVA_RESERVED = new Set(
+  ('abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float ' +
+    'for goto if implements import instanceof int interface long native new package private protected public return short static ' +
+    'strictfp super switch synchronized this throw throws transient try void volatile while true false null var record yield _').split(' '),
+);
+
+/**
+ * One segment of a Java package name, from a folder or project name: characters Java does not
+ * allow become `_`, a leading digit gets a `_` in front and a reserved word a `_` after
+ * (`my-app` -> `my_app`, `2fa` -> `_2fa`, `static` -> `static_`).
+ */
+export function javaPackageSegment(name: string): string {
+  let seg = name.replace(/[^A-Za-z0-9_]/g, '_');
+  if (/^[0-9]/.test(seg)) seg = `_${seg}`;
+  if (JAVA_RESERVED.has(seg)) seg = `${seg}_`;
+  return seg;
+}
+
+/**
+ * The package a project's views sit under, from its name (usually its root folder's name):
+ * lowercase, as Java packages are by convention, with each dotted part made a valid segment
+ * (`Sample-Python-Project` -> `sample_python_project`, `com.acme.shop` stays as it is).
+ */
+export function basePackageFor(projectName: string): string {
+  return projectName
+    .split('.')
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean)
+    .map(javaPackageSegment)
+    .join('.');
+}
+
+/** The Python package a module is in, as folder names: `app/services/x.py` -> `['app', 'services']`. */
+export function pythonPackageParts(relativePath: string): string[] {
+  return relativePath.split('/').slice(0, -1).filter((p) => p && p !== '.');
+}
+
+/**
+ * Java package of a module: the base package (the project's name, see `basePackageFor`) followed by
+ * its folder path, `app/services/x.py` -> `sample_project.app.services`.
+ */
+export function packageFromPath(relativePath: string, basePackage = ''): string {
+  return [...(basePackage ? [basePackage] : []), ...pythonPackageParts(relativePath).map(javaPackageSegment)].join('.');
 }
 
 /**
@@ -169,14 +215,14 @@ export function packageFromPath(relativePath: string): string {
  * `app.models`, a package module `app/__init__.py` -> `app`.
  */
 export function pythonModuleKey(relativePath: string): string {
-  const pkg = packageFromPath(relativePath);
+  const pkg = pythonPackageParts(relativePath).join('.');
   if (isInitModule(relativePath)) return pkg;
   const base = (relativePath.split('/').pop() ?? '').replace(/\.py$/, '');
   return pkg ? `${pkg}.${base}` : base;
 }
 
-/** Fully qualified name of the Java class a module becomes: `app/models.py` -> `app.Models`. */
-export function javaModuleClass(relativePath: string): string {
-  const pkg = packageFromPath(relativePath);
+/** Fully qualified name of the Java class a module becomes: `app/models.py` -> `sample_project.app.Models`. */
+export function javaModuleClass(relativePath: string, basePackage = ''): string {
+  const pkg = packageFromPath(relativePath, basePackage);
   return pkg ? `${pkg}.${moduleClassName(relativePath)}` : moduleClassName(relativePath);
 }

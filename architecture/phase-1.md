@@ -6,13 +6,20 @@ is never meant to compile; it exists so a Java developer can read Python code
 at a glance, using Java syntax, before reviewing or steering an AI's changes.
 
 ```
-my-project/                          my-project/.java-view/
-├── main.py                          ├── Main.java
-└── inventory/                       └── inventory/
-    ├── models.py            ==>         ├── Models.java
-    └── services/                        └── services/
-        └── order_service.py                 └── OrderService.java
+my-project/                          my-project/.java-view/src/
+├── main.py                          ├── main/java/my_project/
+├── inventory/                       │   ├── Main.java
+│   ├── models.py            ==>     │   └── inventory/
+│   └── services/                    │       ├── Models.java
+│       └── order_service.py         │       └── services/OrderService.java
+└── tests/test_x.py                  └── test/java/my_project/tests/TestX.java
 ```
+
+The output is a standard Maven/Gradle layout: test modules (`isTestFile`) go to
+`src/test/java`, the rest to `src/main/java`. A module's package is the base
+package (the project folder's name, or `pyrite.basePackage`; see
+`projectBasePackage` in `src/mirror.ts`) followed by its Python folder path.
+Python-side names (`pythonModuleKey`, relative-import resolution) stay unprefixed.
 
 ## Engine
 

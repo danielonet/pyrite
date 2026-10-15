@@ -39,21 +39,31 @@ The name is the disclaimer. Pyrite is fool's gold: it looks like Java but is not
 it is never meant to compile. It is a faithful *reading view* of the Python underneath.
 
 Pyrite mirrors every `.py` file in your workspace into a `.java-view/`
-folder with the **same directory structure** (each file named after its Java
-class, as Java requires), translating each module into a Java-flavored
+folder laid out as a **standard Java project**: production code in
+`src/main/java`, test code (`test_*.py`, `*_test.py`, `conftest.py`, anything under
+`test`/`tests`) in `src/test/java`. Every package starts with the project's name
+(the workspace folder, or `pyrite.basePackage`) followed by the Python folder path,
+and each file is named after its Java class, as Java requires. Each module is
+translated into a Java-flavored
 *reading view*. The view keeps Python's names, order, comments
 and docstrings, but uses Java syntax: braces, semicolons, explicit types,
 `for (var x : xs)`, `throw new ...`, streams instead of comprehensions, and
 so on. It is meant to be **read**, not compiled.
 
 ```
-my-project/                          my-project/.java-view/
-├── main.py                          ├── Main.java
-└── inventory/                       └── inventory/
-    ├── models.py            ==>         ├── Models.java
-    └── services/                        └── services/
-        └── order_service.py                 └── OrderService.java
+my-project/                          my-project/.java-view/src/
+├── main.py                          ├── main/java/my_project/
+├── inventory/                       │   ├── Main.java                  package my_project;
+│   ├── models.py            ==>     │   └── inventory/
+│   └── services/                    │       ├── Models.java            package my_project.inventory;
+│       └── order_service.py         │       └── services/
+└── tests/                           │           └── OrderService.java  package my_project.inventory.services;
+    └── test_order_service.py        └── test/java/my_project/tests/
+                                         └── TestOrderService.java      package my_project.tests;
 ```
+
+Imports of the project's own modules carry the same prefix
+(`from .models import Order` -> `import my_project.inventory.models.Order;`).
 
 ## Features
 
@@ -324,7 +334,8 @@ Use `--dry-run` to build and package without publishing.
 | `pyrite.ollama.timeoutSeconds` | `300` | give up on one request after this long and keep the rules output |
 | `pyrite.ollama.maxFunctionsPerFile` | `10` | at most this many functions per file go to the model |
 | `pyrite.ollama.resolveImports` | `true` | in `hybrid` mode, replace the Python-shaped imports with real Java ones (see [Real Java imports](#real-java-imports-hybrid)) |
-| `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root) |
+| `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root), as `src/main/java` and `src/test/java` |
+| `pyrite.basePackage` | *(empty)* | package every view starts with, e.g. `com.acme.shop`; empty uses the workspace folder's name (`my-project` -> `my_project`) |
 | `pyrite.exclude` | venv, node_modules, ... | glob patterns to skip |
 | `pyrite.watch` | `true` | re-translate on save |
 | `pyrite.javadoc` | `docstringOnly` | Javadoc generation: `always` (every class/method, extrapolated when there's no docstring), `docstringOnly` (only where a docstring exists), or `none` (no Javadoc; docstrings kept as plain comments) |

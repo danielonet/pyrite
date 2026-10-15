@@ -110,7 +110,8 @@ function classMap(javaRel: string, className: string): SourceMapFile {
 test('SymbolIndexCache reads once, then re-reads only what it is told changed', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-idxcache-'));
   try {
-    writeMap(root, '.java-view', classMap('A.java', 'Alpha'));
+    // a.py's view, where mirroring with base package "p" puts it.
+    writeMap(root, '.java-view', classMap('src/main/java/p/A.java', 'Alpha'));
     writeMap(root, '.java-view', classMap('pkg/B.java', 'Beta'));
     const cache = new SymbolIndexCache(root, '.java-view');
     const names = async () => (await cache.get()).map((s) => s.name).sort();
@@ -121,9 +122,9 @@ test('SymbolIndexCache reads once, then re-reads only what it is told changed', 
     assert.equal(await cache.get(), first, 'an unchanged index is served from memory');
 
     // Rewrite both maps but only report one: the unreported one must not be re-read.
-    writeMap(root, '.java-view', classMap('A.java', 'AlphaV2'));
+    writeMap(root, '.java-view', classMap('src/main/java/p/A.java', 'AlphaV2'));
     writeMap(root, '.java-view', classMap('pkg/B.java', 'BetaV2'));
-    cache.invalidatePython('a.py');
+    cache.invalidatePython('a.py', 'p');
     assert.deepEqual(await names(), ['AlphaV2', 'Beta']);
 
     // A deleted map disappears from the index.
@@ -177,7 +178,7 @@ test('SymbolIndexCache.stats reports files, declarations and errors for the stat
     });
     writeMap(root, '.java-view', {
       python: 'broken.py',
-      java: '.java-view/Broken.java',
+      java: '.java-view/src/main/java/p/Broken.java',
       engine: 'rules',
       generatedAt: '2026-09-17T11:00:00.000Z',
       lines: [],
@@ -208,8 +209,8 @@ test('SymbolIndexCache.stats reports files, declarations and errors for the stat
     assert.equal(stats.lastGenerated?.toISOString(), '2026-09-17T12:30:00.000Z');
 
     // Stats follow the same incremental invalidation as the symbol index.
-    fs.rmSync(path.join(cache.mapsRoot, 'Broken.java.json'));
-    cache.invalidatePython('broken.py');
+    fs.rmSync(path.join(cache.mapsRoot, 'src', 'main', 'java', 'p', 'Broken.java.json'));
+    cache.invalidatePython('broken.py', 'p');
     const after = await cache.stats();
     assert.equal(after.files, 2);
     assert.equal(after.failed, 0);

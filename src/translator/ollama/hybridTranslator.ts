@@ -224,7 +224,7 @@ export class HybridTranslator implements Translator {
    */
   private async resolveImports(input: TranslateInput, view: JavaView, warnings: string[]): Promise<{ view: JavaView; usedModel: boolean }> {
     const modules = input.knownMembers?.modules ?? {};
-    const plan = planImports(view, input.source, modules, input.knownMembers?.classes);
+    const plan = planImports(view, input.source, modules, input.knownMembers?.classes, input.basePackage);
     let fromModel: ModelImports | undefined;
     if (askable(plan).length && Date.now() >= this.unreachableUntil) {
       try {

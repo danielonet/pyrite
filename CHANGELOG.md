@@ -27,6 +27,16 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Changed
 
+- **The view is a standard Java project.** Views are written to
+  `.java-view/src/main/java`, and test modules (`test_*.py`, `*_test.py`,
+  `conftest.py`, anything under `test`/`tests`) to `.java-view/src/test/java`.
+  Every package starts with the project's name, then the Python folder path:
+  `my-project/inventory/models.py` is `package my_project.inventory;` in
+  `src/main/java/my_project/inventory/Models.java`. Imports of the project's
+  own modules carry the same prefix. New setting `pyrite.basePackage` (CLI
+  `--package`) replaces the folder name, e.g. `com.acme.shop`. Folder names
+  that are Java keywords get a `_` suffix (`static` -> `static_`). Views left
+  in the old flat layout are removed on the next regeneration.
 - **View files are named after their Java class**, as `javac` requires:
   `order_service.py` -> `OrderService.java`, `main.py` -> `Main.java`. A
   package module's class takes the `Init` suffix its file already had,

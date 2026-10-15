@@ -9,7 +9,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { MAP_DIR, MEMBERS_FILE_NAME, SourceMapFile, ViewStatus, mapPathFor } from './mirror';
+import { MAP_DIR, MEMBERS_FILE_NAME, SourceMapFile, ViewStatus, mapPathFor, projectBasePackage } from './mirror';
 import { SymbolInfo, isInitModule } from './translator';
 
 export interface IndexedSymbol extends SymbolInfo {
@@ -157,11 +157,11 @@ export class SymbolIndexCache {
     this.touch();
   }
 
-  /** The Java view of one Python file (relative to root) was regenerated or removed. */
-  invalidatePython(relativePython: string): void {
+  /** The Java view of one Python file (relative to root) was regenerated or removed; `basePackage` as it was mirrored with. */
+  invalidatePython(relativePython: string, basePackage = projectBasePackage(this.root)): void {
     // A package module may also have dropped maps under older file names; rescan rather than track them all.
     if (isInitModule(relativePython)) this.invalidateAll();
-    else this.invalidateMap(path.join(this.root, this.outputFolder, mapPathFor(relativePython)));
+    else this.invalidateMap(path.join(this.root, this.outputFolder, mapPathFor(relativePython, basePackage)));
   }
 
   private touch(): void {
