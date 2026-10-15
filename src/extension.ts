@@ -57,6 +57,7 @@ interface Settings {
   ollamaModel: string;
   ollamaTimeoutSeconds: number;
   ollamaMaxFunctions: number;
+  ollamaResolveImports: boolean;
 }
 
 function settings(): Settings {
@@ -74,6 +75,7 @@ function settings(): Settings {
     ollamaModel: cfg.get<string>('ollama.model', 'qwen2.5-coder:7b'),
     ollamaTimeoutSeconds: cfg.get<number>('ollama.timeoutSeconds', 300),
     ollamaMaxFunctions: cfg.get<number>('ollama.maxFunctionsPerFile', 10),
+    ollamaResolveImports: cfg.get<boolean>('ollama.resolveImports', true),
   };
 }
 
@@ -84,6 +86,7 @@ function ollamaOptions(s: Settings, root: string): Partial<OllamaOptions> {
     model: s.ollamaModel,
     timeoutMs: s.ollamaTimeoutSeconds * 1000,
     maxBlocksPerFile: s.ollamaMaxFunctions,
+    resolveImports: s.ollamaResolveImports,
     cacheFile: ollamaCacheFile(root, s.outputFolder),
   };
 }

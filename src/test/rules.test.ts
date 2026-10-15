@@ -158,23 +158,23 @@ class Repo:
   const lines = result.java.split('\n');
   const byName = (name: string) => result.symbols.filter((s) => s.name === name);
 
-  const module = byName('Repo').find((s) => s.container.length === 0);
-  assert.ok(module, 'module class Repo should be recorded');
-  assert.equal(module!.kind, 'class');
-  assert.equal(lines[module!.javaLine], 'public final class Repo {');
-
-  const nestedClass = byName('Repo').find((s) => s.kind === 'class' && s.container.length === 1);
-  assert.ok(nestedClass, 'nested class Repo should be recorded, distinct from the module class');
-  assert.deepEqual(nestedClass!.container, ['Repo']);
-  assert.match(lines[nestedClass!.javaLine], /static class Repo/);
+  // `class Repo` in repo.py is the module's class itself: Java forbids a nested Repo inside Repo.
+  const classes = byName('Repo').filter((s) => s.kind === 'class');
+  assert.equal(classes.length, 1, 'one Repo class, not a module class plus a nested one');
+  assert.deepEqual(classes[0].container, []);
+  assert.equal(classes[0].pythonClass, true);
+  assert.equal(lines[classes[0].javaLine], 'public class Repo {');
+  const fetch = byName('fetch')[0];
+  assert.deepEqual(fetch.container, ['Repo']);
+  assert.match(lines[fetch.javaLine], /^ {4}public \w+ fetch\(/, 'members are one level in');
 
   const ctor = byName('Repo').find((s) => s.kind === 'method');
   assert.ok(ctor, 'constructor should be recorded as a method named after the class');
-  assert.deepEqual(ctor!.container, ['Repo', 'Repo']);
+  assert.deepEqual(ctor!.container, ['Repo']);
 
   const field = byName('url').find((s) => s.kind === 'field');
   assert.ok(field, 'field url should be recorded');
-  assert.deepEqual(field!.container, ['Repo', 'Repo']);
+  assert.deepEqual(field!.container, ['Repo']);
   assert.match(lines[field!.javaLine], /String url;/);
 
   const method = byName('fetch').find((s) => s.kind === 'method');
@@ -519,11 +519,11 @@ test('mirrorFile skips a bare __init__.py and removes its stale Java view', asyn
     fs.writeFileSync(init, '__version__ = "1.0"\n', 'utf8');
     const first = await mirrorFile(translator, root, 'pkg/__init__.py');
     assert.equal(first.skipped, false);
-    const javaAbs = path.join(root, '.java-view', 'pkg', 'pkgInit.java');
+    const javaAbs = path.join(root, '.java-view', 'pkg', 'PkgInit.java');
     assert.ok(fs.existsSync(javaAbs));
-    contains(fs.readFileSync(javaAbs, 'utf8'), 'public final class Pkg {');
+    contains(fs.readFileSync(javaAbs, 'utf8'), 'public final class PkgInit {');
     // Leftovers from the names earlier versions used are cleaned up too.
-    const legacy = ['__init__.java', 'Pkg.java', 'PkgPackage.java'].map((n) => path.join(root, '.java-view', 'pkg', n));
+    const legacy = ['__init__.java', 'Pkg.java', 'PkgPackage.java', 'pkgInit.java'].map((n) => path.join(root, '.java-view', 'pkg', n));
     for (const abs of legacy) fs.writeFileSync(abs, '// stale', 'utf8');
     await mirrorFile(translator, root, 'pkg/__init__.py');
     for (const abs of legacy) assert.equal(fs.existsSync(abs), false, `legacy ${path.basename(abs)} should be removed`);
@@ -533,21 +533,22 @@ test('mirrorFile skips a bare __init__.py and removes its stale Java view', asyn
     const second = await mirrorFile(translator, root, 'pkg/__init__.py');
     assert.equal(second.skipped, true);
     assert.equal(fs.existsSync(javaAbs), false, 'stale Java view should be removed');
-    assert.equal(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'pkgInit.java.json')), false, 'stale map should be removed');
+    assert.equal(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'PkgInit.java.json')), false, 'stale map should be removed');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
 test('package module: named after its folder, Javadoc names the original __init__.py', () => {
-  assert.equal(moduleClassName('app/inventory/__init__.py'), 'Inventory');
+  assert.equal(moduleClassName('app/inventory/__init__.py'), 'InventoryInit');
   assert.equal(moduleClassName('app/order_service.py'), 'OrderService');
   assert.equal(moduleClassName('__init__.py'), 'Init');
-  assert.equal(javaPathFor('app/inventory/__init__.py'), 'app/inventory/inventoryInit.java');
-  assert.equal(javaPathFor('app/order_items/__init__.py'), 'app/order_items/orderItemsInit.java');
-  assert.equal(moduleClassName('app/order_items/__init__.py'), 'OrderItems');
-  assert.equal(javaPathFor('app/order_service.py'), 'app/order_service.java');
-  // The Init suffix keeps the file distinct from a sibling module on a case-insensitive filesystem.
+  // A view file is named after its public class, as javac requires.
+  assert.equal(javaPathFor('app/inventory/__init__.py'), 'app/inventory/InventoryInit.java');
+  assert.equal(javaPathFor('app/order_items/__init__.py'), 'app/order_items/OrderItemsInit.java');
+  assert.equal(moduleClassName('app/order_items/__init__.py'), 'OrderItemsInit');
+  assert.equal(javaPathFor('app/order_service.py'), 'app/OrderService.java');
+  // The Init suffix keeps the package module apart from a sibling module of the same name.
   assert.notEqual(
     javaPathFor('app/inventory/__init__.py').toLowerCase(),
     javaPathFor('app/inventory/inventory.py').toLowerCase(),
@@ -555,16 +556,16 @@ test('package module: named after its folder, Javadoc names the original __init_
 
   const src = '\"\"\"Inventory domain package.\"\"\"\n__version__ = "0.1.0"\n';
   const withDoc = java(src, 'app/inventory/__init__.py');
-  contains(withDoc, 'public final class Inventory {');
+  contains(withDoc, 'public final class InventoryInit {');
   contains(withDoc, ' * Inventory domain package.');
   contains(withDoc, " * Translated from {@code app/inventory/__init__.py}, the {@code inventory} package's __init__ module.");
   assert.ok(!withDoc.includes('InventoryPackage'));
 
   // Without a docstring in docstringOnly mode there is no Javadoc, so the origin goes in a plain comment.
   const noDoc = java('__version__ = "0.1.0"\n', 'app/inventory/__init__.py');
-  contains(noDoc, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class Inventory {");
+  contains(noDoc, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class InventoryInit {");
   const none = translateWithRules({ source: src, relativePath: 'app/inventory/__init__.py', javadocMode: 'none' }).java;
-  contains(none, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class Inventory {");
+  contains(none, "// Translated from app/inventory/__init__.py, the package's __init__ module.\npublic final class InventoryInit {");
 });
 
 function lombok(source: string, relativePath = 'pkg/mod.py'): string {
@@ -671,7 +672,7 @@ test('a failed translation writes a placeholder view instead of leaving the old 
     const { translator } = createTranslator({ engine: 'rules' });
     const first = await mirrorFile(translator, root, 'pkg/mod.py');
     assert.equal(first.skipped, false);
-    const javaAbs = path.join(root, '.java-view', 'pkg', 'mod.java');
+    const javaAbs = path.join(root, '.java-view', 'pkg', 'Mod.java');
     contains(fs.readFileSync(javaAbs, 'utf8'), 'static int x = 1;');
 
     const broken: Translator = { name: 'rules', translate: async () => { throw new Error('boom on line 3'); } };
@@ -682,7 +683,7 @@ test('a failed translation writes a placeholder view instead of leaving the old 
     contains(view, 'package pkg;');
     contains(view, 'public final class Mod {');
     assert.ok(!view.includes('static int x = 1;'), 'the stale code must be gone');
-    const map = JSON.parse(fs.readFileSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'mod.java.json'), 'utf8'));
+    const map = JSON.parse(fs.readFileSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', 'Mod.java.json'), 'utf8'));
     assert.deepEqual(map.symbols, []);
     assert.deepEqual(map.lines, []);
   } finally {
@@ -702,11 +703,11 @@ test('removeMirroredFolder deletes the mirrored subtree and its maps, and nothin
     removeMirroredFolder(root, 'app/old/');
     assert.equal(fs.existsSync(path.join(root, '.java-view', 'app', 'old')), false);
     assert.equal(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'app', 'old')), false);
-    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'keep.java')));
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'Keep.java')));
     // Guard rails: never wipe the output root or escape it.
     removeMirroredFolder(root, '');
     removeMirroredFolder(root, '../elsewhere');
-    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'keep.java')));
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'Keep.java')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -944,7 +945,7 @@ test('cross-file knowledge: the project mirror scans every file first and leaves
     const { translator } = createTranslator({ engine: 'rules' });
     const { mirrorProject } = await import('../mirror');
     await mirrorProject(translator, { root });
-    const view = () => fs.readFileSync(path.join(root, '.java-view', 'app', 'service.java'), 'utf8');
+    const view = () => fs.readFileSync(path.join(root, '.java-view', 'app', 'Service.java'), 'utf8');
     contains(view(), 'Order o = this.repo.order(1);');
     contains(view(), 'return this.repo.size();');
     assert.ok(fs.existsSync(path.join(root, '.java-view', '.pyrite', 'maps', 'members.json')));
@@ -1000,7 +1001,7 @@ test('a file with a Python syntax error is still translated but flagged at the t
     const { translator } = createTranslator({ engine: 'rules' });
     const outcome = await mirrorFile(translator, root, 'pkg/bad.py');
     assert.equal(outcome.skipped, false);
-    const view = fs.readFileSync(path.join(root, '.java-view', 'pkg', 'bad.java'), 'utf8');
+    const view = fs.readFileSync(path.join(root, '.java-view', 'pkg', 'Bad.java'), 'utf8');
     contains(view, '// WARNING: pkg/bad.py has Python syntax errors');
     contains(view, 'line 4,');
     contains(view, 'public static Object ok() {');
@@ -1243,16 +1244,73 @@ test('each sidecar map records how its translation went, for the status bar repo
     const readMap = (name: string) => JSON.parse(fs.readFileSync(path.join(root, '.java-view', '.pyrite', 'maps', 'pkg', `${name}.java.json`), 'utf8'));
 
     await mirrorFile(translator, root, 'pkg/ok.py');
-    assert.equal(readMap('ok').status, 'ok');
-    assert.equal(readMap('ok').warnings, 0);
+    assert.equal(readMap('Ok').status, 'ok');
+    assert.equal(readMap('Ok').warnings, 0);
 
     await mirrorFile(translator, root, 'pkg/bad.py');
-    assert.equal(readMap('bad').status, 'syntax');
-    assert.ok(readMap('bad').warnings >= 1);
+    assert.equal(readMap('Bad').status, 'syntax');
+    assert.ok(readMap('Bad').warnings >= 1);
 
     const broken: Translator = { name: 'rules', translate: async () => { throw new Error('boom'); } };
     await assert.rejects(mirrorFile(broken, root, 'pkg/ok.py'));
-    assert.equal(readMap('ok').status, 'failed');
+    assert.equal(readMap('Ok').status, 'failed');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a class named like its module becomes the module class, keeping its header, annotations and members', () => {
+  const result = translateWithRules({
+    source: `from dataclasses import dataclass
+
+LIMIT = 3
+
+
+@dataclass
+class Point(Shape):
+    """A point."""
+    x: int
+
+    def norm(self) -> float:
+        return self.x
+
+
+ORIGIN = Point(0)
+`,
+    relativePath: 'app/point.py',
+    lombokStyle: true,
+  });
+  const lines = result.java.split('\n');
+  assert.equal(lines.length, result.sourceMap.length);
+  contains(result.java, '/** A point. */\n@Data\npublic class Point extends Shape {\n    public static final int LIMIT = 3;');
+  contains(result.java, '\n    public int x;');
+  contains(result.java, '\n    public static final Point ORIGIN = new Point(0);\n}');
+  assert.doesNotMatch(result.java, /class Point \{|static class Point/);
+  for (const s of result.symbols) assert.ok(lines[s.javaLine].includes(s.name), `${s.name} -> ${lines[s.javaLine]}`);
+  assert.equal(result.sourceMap[lines.indexOf('public class Point extends Shape {')], 7);
+});
+
+test('an enum named like its module comes first, and its constants end with ";" before other members', () => {
+  const out = java('from enum import Enum\n\nDEFAULT = "new"\n\nclass Status(Enum):\n    NEW = 1\n    DONE = 2\n\ndef parse(s):\n    return s\n', 'app/status.py');
+  contains(out, 'public enum Status {\n    NEW(1),\n    DONE(2);\n\n    public static final String DEFAULT = "new";');
+  const nested = java('from enum import Enum\nclass S(Enum):\n    A = 1\n\n    def f(self):\n        return 1\nclass T(Enum):\n    C = 1\n', 'app/x.py');
+  contains(nested, '        A(1);\n');
+  contains(nested, '        C(1),\n    }');
+});
+
+test('a view left under the old file name is removed when the module is regenerated', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-rename-'));
+  try {
+    fs.mkdirSync(path.join(root, 'app'));
+    fs.writeFileSync(path.join(root, 'app', 'order_service.py'), 'X = 1\n', 'utf8');
+    const old = ['order_service.java', '.pyrite/maps/app/order_service.java.json'].map((r) => path.join(root, '.java-view', ...(r.startsWith('.pyrite') ? [r] : ['app', r])));
+    for (const abs of old) {
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, '// stale', 'utf8');
+    }
+    await mirrorFile(createTranslator({ engine: 'rules' }).translator, root, 'app/order_service.py');
+    for (const abs of old) assert.equal(fs.existsSync(abs), false, `${abs} should be removed`);
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'app', 'OrderService.java')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -20,6 +20,7 @@ interface Args {
   engine: EngineName;
   ollamaUrl?: string;
   ollamaModel?: string;
+  javaImports: boolean;
   javadoc: JavadocMode;
   javadocTestCode: boolean;
   lombok: boolean;
@@ -28,7 +29,7 @@ interface Args {
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { out: '.java-view', engine: 'rules', javadoc: 'docstringOnly', javadocTestCode: false, lombok: true, lineWidth: 120, quiet: false };
+  const args: Args = { out: '.java-view', engine: 'rules', javaImports: true, javadoc: 'docstringOnly', javadocTestCode: false, lombok: true, lineWidth: 120, quiet: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -43,6 +44,7 @@ function parseArgs(argv: string[]): Args {
       args.engine = value;
     } else if (a === '--ollama-url') args.ollamaUrl = next();
     else if (a === '--ollama-model') args.ollamaModel = next();
+    else if (a === '--no-java-imports') args.javaImports = false;
     else if (a === '--javadoc') {
       const value = next();
       if (!JAVADOC_MODES.includes(value as JavadocMode)) {
@@ -83,14 +85,16 @@ function printUsage(): void {
   --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).
   --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).
   --line-width <n>      Wrap generated lines longer than n columns (default: 120, 0 = no wrapping).
-  --engine hybrid       Also rewrite hard functions with a local Ollama model (--ollama-url, --ollama-model).`);
+  --engine hybrid       Also rewrite hard functions with a local Ollama model (--ollama-url, --ollama-model),
+                        and replace the Python-shaped imports with real Java ones.
+  --no-java-imports     With --engine hybrid: keep the rules engine's imports as they are.`);
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const { translator, note } = createTranslator({
     engine: args.engine,
-    ollama: { ...(args.root && { cacheFile: ollamaCacheFile(path.resolve(args.root), args.out) }), ...(args.ollamaUrl && { url: args.ollamaUrl }), ...(args.ollamaModel && { model: args.ollamaModel }) },
+    ollama: { resolveImports: args.javaImports, ...(args.root && { cacheFile: ollamaCacheFile(path.resolve(args.root), args.out) }), ...(args.ollamaUrl && { url: args.ollamaUrl }), ...(args.ollamaModel && { model: args.ollamaModel }) },
   });
   if (note) console.error(`note: ${note}`);
 

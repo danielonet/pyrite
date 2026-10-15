@@ -15,9 +15,29 @@ All notable changes to Pyrite are recorded here. The format follows
   adds a warning. Answers are cached in `.java-view/.pyrite/ollama-cache.json`.
   New settings `pyrite.ollama.url`, `.model`, `.timeoutSeconds`,
   `.maxFunctionsPerFile`; CLI `--engine hybrid --ollama-url --ollama-model`.
+- **Real Java imports in `hybrid` mode.** The Python-shaped import block
+  (`import logging;`, `import typing.Dict;`, `java.util.*`) is replaced by
+  explicit imports of real classes: JDK classes looked up in an index generated
+  from a real JDK, the classes Pyrite generates for the project's own modules
+  (static imports for functions and constants), Lombok for its annotations,
+  and, for the names left over, the local model, whose suggestions are checked
+  against the JDK. Python imports with no Java counterpart stay as
+  `// python: ...` comments. New setting `pyrite.ollama.resolveImports`
+  (default on); CLI `--no-java-imports`.
 
 ### Changed
 
+- **View files are named after their Java class**, as `javac` requires:
+  `order_service.py` -> `OrderService.java`, `main.py` -> `Main.java`. A
+  package module's class takes the `Init` suffix its file already had,
+  `inventory/__init__.py` -> `class InventoryInit` in `InventoryInit.java`.
+  Views written under the old names are removed on the next regeneration.
+- **A class named like its module is the module's class.** `class
+  OrderService` in `order_service.py` used to become
+  `OrderService.OrderService`, which Java rejects; it is now
+  `public class OrderService` itself, with the module's constants and
+  functions as its static members (an enum's constants stay first).
+- Enum constants followed by methods or fields end with `;`, as Java requires.
 - **New logo.** The two Python snakes around a steaming cup of Java, in
   `media/icon.png`, the Activity Bar outline and the status bar glyph.
 - **The status bar report is laid out like the Copilot status panel**: a

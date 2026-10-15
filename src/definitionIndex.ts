@@ -122,8 +122,8 @@ export class SymbolIndexCache {
       if (entry.status === 'failed') stats.failed += 1;
       if (entry.status === 'syntax') stats.syntaxErrors += 1;
       for (const s of entry.symbols) {
-        // Every file gets a wrapper class named after the module; only nested ones are Python classes.
-        if (s.kind === 'class' && s.container.length > 0) stats.classes += 1;
+        // Every file gets a class named after the module; it is a Python class only when one was promoted to it.
+        if (s.kind === 'class' && (s.container.length > 0 || s.pythonClass)) stats.classes += 1;
         else if (s.kind === 'method') stats.methods += 1;
         else if (s.kind === 'field') stats.fields += 1;
       }

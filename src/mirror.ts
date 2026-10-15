@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { JavadocMode, KnownMembers, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath } from './translator';
+import { JavadocMode, KnownMembers, SymbolInfo, TranslateResult, Translator, isInitModule, javaFileBaseName, moduleClassName, packageFromPath, javaModuleClass, pythonModuleKey } from './translator';
 import { knownMembersOf, mergeKnownMembers } from './translator/rules/members';
 import { checkSyntax } from './parser/pythonParser';
 import { splitLogicalLines } from './translator/rules/logicalLines';
@@ -211,11 +211,10 @@ export function listPythonFiles(root: string, exclude: string[] = DEFAULT_EXCLUD
 }
 
 /**
- * Java view path for a Python file: `app/order_service.py` -> `app/order_service.java`.
- * A package module is named after its folder in lowerCamelCase plus an `Init` suffix,
- * `app/inventory/__init__.py` -> `app/inventory/inventoryInit.java`: the suffix hints at the
- * `__init__.py` origin and keeps the file from colliding with a sibling `inventory.py` on
- * Windows/macOS, where file names are case-insensitive.
+ * Java view path for a Python file, named after the module's public class as `javac` requires:
+ * `app/order_service.py` -> `app/OrderService.java`. A package module takes an `Init` suffix,
+ * `app/inventory/__init__.py` -> `app/inventory/InventoryInit.java`, which hints at the
+ * `__init__.py` origin and keeps it apart from a sibling `inventory.py` -> `Inventory.java`.
  */
 export function javaPathFor(relativePython: string): string {
   const dir = relativePython.slice(0, relativePython.lastIndexOf('/') + 1);
@@ -281,7 +280,13 @@ export async function scanProjectMembers(root: string, files: string[], isCancel
     if (isCancelled?.()) break;
     await yieldToEventLoop();
     try {
-      parts.push(knownMembersOf(await fs.promises.readFile(path.join(root, rel), 'utf8')));
+      const source = await fs.promises.readFile(path.join(root, rel), 'utf8');
+      const moduleClass = javaModuleClass(rel);
+      // Top-level classes become classes nested in the module's class, except one named like the
+      // module, which becomes the module's class itself (see promoteModuleNamedClass).
+      const simple = moduleClass.split('.').pop();
+      const classes = Object.fromEntries([...source.matchAll(/^class\s+(\w+)/gm)].map((m) => [m[1], m[1] === simple ? moduleClass : `${moduleClass}.${m[1]}`]));
+      parts.push({ ...knownMembersOf(source), modules: { [pythonModuleKey(rel)]: moduleClass }, classes });
     } catch {
       // unreadable file: it will be reported when it is translated
     }
@@ -303,8 +308,8 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     removeMirroredFile(root, relativePython, outputFolder);
     return { skipped: true };
   }
-  // Earlier versions wrote package modules under other names; drop those so they don't linger next to the current file.
-  if (isInitModule(relativePython)) removeLegacyInitViews(root, relativePython, outputFolder);
+  // Earlier versions wrote views under other names; drop those so they don't linger next to the current file.
+  removeLegacyViews(root, relativePython, outputFolder);
   let result: TranslateResult;
   const knownMembers = options.knownMembers ?? readMembersFile(root, outputFolder);
   try {
@@ -410,20 +415,24 @@ export function removeMirroredFile(root: string, relativePython: string, outputF
     const abs = path.join(outRoot, rel);
     if (fs.existsSync(abs)) fs.rmSync(abs);
   }
-  if (isInitModule(relativePython)) removeLegacyInitViews(root, relativePython, outputFolder);
+  removeLegacyViews(root, relativePython, outputFolder);
 }
 
-/**
- * Remove views + maps a package module was written to by earlier versions of Pyrite:
- * `__init__.java`, `Inventory.java` and `InventoryPackage.java`.
- */
-function removeLegacyInitViews(root: string, relativePython: string, outputFolder: string): void {
+/** Remove the views + maps earlier versions of Pyrite wrote for this module under other names. */
+function removeLegacyViews(root: string, relativePython: string, outputFolder: string): void {
   const outRoot = path.join(root, outputFolder);
   const dir = relativePython.slice(0, relativePython.lastIndexOf('/') + 1);
   const current = javaPathFor(relativePython);
-  const cls = moduleClassName(relativePython);
-  const legacy = [relativePython.replace(/\.py$/, '.java'), `${dir}${cls}.java`, `${dir}${cls}Package.java`];
+  // Earlier versions kept the Python file's name (`order_service.java`, `inventoryInit.java`);
+  // package modules were once `__init__.java`, `Inventory.java` and `InventoryPackage.java` too.
+  const legacy = [relativePython.replace(/\.py$/, '.java')];
+  if (isInitModule(relativePython)) {
+    const folderClass = moduleClassName(relativePython).replace(/Init$/, '');
+    legacy.push(`${dir}${folderClass.charAt(0).toLowerCase()}${folderClass.slice(1)}Init.java`, `${dir}${folderClass}.java`, `${dir}${folderClass}Package.java`);
+  }
   for (const javaRel of legacy) {
+    // On a case-insensitive filesystem `order_service.java` is never `OrderService.java`, but
+    // `models.java` is `Models.java`: it is removed here and written again right after.
     if (javaRel === current) continue;
     for (const rel of [javaRel, `${MAP_DIR}/${javaRel}.json`]) {
       const abs = path.join(outRoot, rel);

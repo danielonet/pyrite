@@ -39,19 +39,20 @@ The name is the disclaimer. Pyrite is fool's gold: it looks like Java but is not
 it is never meant to compile. It is a faithful *reading view* of the Python underneath.
 
 Pyrite mirrors every `.py` file in your workspace into a `.java-view/`
-folder with the **same directory structure**, translating each module into a
-Java-flavored *reading view*. The view keeps Python's names, order, comments
+folder with the **same directory structure** (each file named after its Java
+class, as Java requires), translating each module into a Java-flavored
+*reading view*. The view keeps Python's names, order, comments
 and docstrings, but uses Java syntax: braces, semicolons, explicit types,
 `for (var x : xs)`, `throw new ...`, streams instead of comprehensions, and
 so on. It is meant to be **read**, not compiled.
 
 ```
 my-project/                          my-project/.java-view/
-├── main.py                          ├── main.java
+├── main.py                          ├── Main.java
 └── inventory/                       └── inventory/
-    ├── models.py            ==>         ├── models.java
+    ├── models.py            ==>         ├── Models.java
     └── services/                        └── services/
-        └── order_service.py                 └── order_service.java
+        └── order_service.py                 └── OrderService.java
 ```
 
 ## Features
@@ -91,8 +92,9 @@ What it maps:
 
 | Python | Java view |
 | --- | --- |
-| module `order_service.py` | `public final class OrderService { ... }` |
+| module `order_service.py` | `public final class OrderService { ... }` in `OrderService.java` |
 | `class Foo(Base):` | `public static class Foo extends Base {` |
+| `class OrderService:` inside `order_service.py` | the module's class itself, `public class OrderService { ... }`, with the module's constants and functions as its static members (Java forbids a nested class named like its enclosing class) |
 | `@dataclass` fields, `self.x = ...` in `__init__` | field declarations with inferred types |
 | `def f(self, a: int, b="x") -> bool:` | `public boolean f(int a, String b /* = "x" */) {` |
 | `__init__`, `__str__`, `__eq__`, `__len__` ... | constructor, `toString()`, `equals()`, `size()` ... |
@@ -111,7 +113,7 @@ What it maps:
 | `ValueError`, `KeyError`, ... | `IllegalArgumentException`, `NoSuchElementException`, ... |
 | docstrings / `# comments` | Javadoc / `// comments` |
 | `inventory/__init__.py` with only a docstring / `__all__` | nothing: Java packages are plain folders |
-| `inventory/__init__.py` with real content (constants, re-exports) | `public final class Inventory`, Javadoc names the original `__init__.py`; written to `inventory/inventoryInit.java`, the `Init` suffix hinting at `__init__.py` and keeping the file distinct from a sibling `inventory.py` on case-insensitive filesystems |
+| `inventory/__init__.py` with real content (constants, re-exports) | `public final class InventoryInit` in `inventory/InventoryInit.java`, Javadoc names the original `__init__.py`; the `Init` suffix hints at `__init__.py` and keeps it apart from a sibling `inventory/inventory.py` (`Inventory.java`) |
 
 Anything without a clean equivalent is kept and annotated with a `/* ... */`
 comment rather than dropped, so the view is always complete.
@@ -143,7 +145,7 @@ Set the mode with `pyrite.engine`:
 | Mode | What runs | Needs |
 | --- | --- | --- |
 | `rules` (default) | Rules engine only | nothing |
-| `hybrid` | Rules engine for everything, plus the local LLM for the functions the rules cannot handle | a running Ollama and a downloaded model |
+| `hybrid` | Rules engine for everything, plus the local LLM for the functions the rules cannot handle, and [real Java imports](#real-java-imports-hybrid) | a running Ollama and a downloaded model |
 
 How `hybrid` works, per file:
 
@@ -165,6 +167,50 @@ How `hybrid` works, per file:
 
 Model output is not deterministic or guaranteed correct: treat a rewritten function as
 a reading aid and check it against the Python, which is why it is marked.
+
+### Real Java imports (`hybrid`)
+
+The rules engine writes Python's imports as Java-looking lines (`import logging;`,
+`import typing.Dict;`) next to `java.util.*` wildcards: fine for reading, but none of them
+names a class `javac` could find. In `hybrid` mode Pyrite replaces that block with explicit
+imports of real classes, a first step towards a Java view that compiles and runs in simple
+cases:
+
+```java
+// before (rules)                          // after (hybrid)
+import java.util.*;                        import java.util.List;
+import java.util.stream.*;                 import java.util.Map;
+import logging;                            import java.util.logging.Logger;
+import typing.Dict;
+import app.models.Order;                   import lombok.Getter;
+import app.utils.formatting.money;
+                                           import app.Models.Order;
+                                           import static app.utils.Formatting.money;
+
+                                           // python: import logging
+                                           // python: from typing import Dict
+```
+
+1. Every type the Java code uses is looked up in an index of the **real JDK** (every public
+   class of the `java.se` modules, generated from JDK 21): `List` becomes `java.util.List`,
+   `Logger` becomes `java.util.logging.Logger`. `java.lang` needs no import.
+2. Imports of your own modules point at the classes Pyrite generates: a class is nested in its
+   module's class (`app.Models.Order`), and a function or constant becomes a static import.
+   A class used without a Python import (from a type hint, say) is found too.
+3. The Lombok annotations Pyrite writes (`@Getter`, `@Data`, ...) import `lombok.*`.
+4. Only the names left over go to the local model, in one request per file (cached like the
+   function rewrites). Its answer is checked: a JDK class must exist in the JDK, and an import
+   must be for a name the code really uses; anything else is dropped with a warning. A
+   library class it suggests is kept and marked `// suggested by <model>; not in the JDK, needs
+   this library on the classpath`.
+
+Python imports with no Java counterpart stay as `// python: ...` comments (so `Ctrl+Alt+J`
+still jumps to them), and names nobody could resolve are listed in a `// No Java import found
+for: ...` comment. If Ollama is not running, steps 1-3 still apply. Turn it off with
+`pyrite.ollama.resolveImports: false` (CLI: `--no-java-imports`).
+
+The rest of the view is still a reading view (`logging.getLogger(__name__)` is not Java), so
+the imports are what is real today, not the whole file.
 
 ## Running a local LLM with Ollama
 
@@ -277,6 +323,7 @@ Use `--dry-run` to build and package without publishing.
 | `pyrite.ollama.model` | `qwen2.5-coder:7b` | model name, exactly as `ollama list` shows it |
 | `pyrite.ollama.timeoutSeconds` | `300` | give up on one request after this long and keep the rules output |
 | `pyrite.ollama.maxFunctionsPerFile` | `10` | at most this many functions per file go to the model |
+| `pyrite.ollama.resolveImports` | `true` | in `hybrid` mode, replace the Python-shaped imports with real Java ones (see [Real Java imports](#real-java-imports-hybrid)) |
 | `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root) |
 | `pyrite.exclude` | venv, node_modules, ... | glob patterns to skip |
 | `pyrite.watch` | `true` | re-translate on save |

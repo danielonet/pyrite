@@ -11,7 +11,7 @@ import java.util.stream.*;
  *
  * Translated from {@code sample-python-project/inventory/__init__.py}, the {@code inventory} package's __init__ module.
  */
-public final class Inventory {
+public final class InventoryInit {
     static String __version__ = "0.1.0";
     static List<Object> __all__ = List.of("models", "repository", "services", "batch", "utils");
 }

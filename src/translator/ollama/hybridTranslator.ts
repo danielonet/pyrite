@@ -10,6 +10,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { IMPORTS_SYSTEM_PROMPT, JavaView, ModelImports, acceptModelImports, applyImports, askable, importsPrompt, planImports, renderImports } from '../imports/javaImports';
 import { RuleBasedTranslator } from '../rules/ruleTranslator';
 import { SymbolInfo, TranslateInput, TranslateResult, Translator } from '../types';
 import { findHardBlocks, PythonBlock } from './hardBlocks';
@@ -20,6 +21,11 @@ export interface OllamaOptions extends OllamaConnection {
   maxBlocksPerFile: number;
   /** JSON file caching model answers, so unchanged functions are not sent again. Optional. */
   cacheFile?: string;
+  /**
+   * Replace the rules engine's Python-shaped imports with real Java ones (JDK index, project
+   * classes, then the model for what is left), a step towards a view that compiles. Default true.
+   */
+  resolveImports?: boolean;
 }
 
 export const DEFAULT_OLLAMA_OPTIONS: OllamaOptions = {
@@ -27,6 +33,7 @@ export const DEFAULT_OLLAMA_OPTIONS: OllamaOptions = {
   model: 'qwen2.5-coder:7b',
   timeoutMs: 300_000,
   maxBlocksPerFile: 10,
+  resolveImports: true,
 };
 
 const UNREACHABLE_BACKOFF_MS = 60_000;
@@ -133,6 +140,28 @@ export class HybridTranslator implements Translator {
 
   async translate(input: TranslateInput): Promise<TranslateResult> {
     const base = await this.rules.translate(input);
+    const warnings = [...base.warnings];
+    let view: JavaView = base;
+    let usedModel = false;
+
+    const rewritten = await this.rewriteHardFunctions(input, base, warnings);
+    if (rewritten) {
+      view = rewritten;
+      usedModel = true;
+    }
+    if (this.options.resolveImports !== false) {
+      const resolved = await this.resolveImports(input, view, warnings);
+      view = resolved.view;
+      usedModel ||= resolved.usedModel;
+    }
+
+    const lines = view.java.split('\n');
+    if (usedModel && lines[1]) lines[1] = lines[1].replace('(rules engine)', `(rules engine + ${this.options.model})`);
+    return { java: lines.join('\n'), sourceMap: view.sourceMap, symbols: view.symbols, warnings, engine: 'hybrid' };
+  }
+
+  /** The rules output with each hard function replaced by the model's rewrite, or undefined when none was rewritten. */
+  private async rewriteHardFunctions(input: TranslateInput, base: TranslateResult, warnings: string[]): Promise<JavaView | undefined> {
     const javaLines = base.java.split('\n');
 
     const warningLines = new Set<number>();
@@ -146,13 +175,12 @@ export class HybridTranslator implements Translator {
     });
 
     const blocks = findHardBlocks(input.source, warningLines, todoLines);
-    if (!blocks.length) return { ...base, engine: 'hybrid' };
+    if (!blocks.length) return undefined;
 
     const pyLines = input.source.split(/\r?\n/);
     let lines = javaLines;
     let map = base.sourceMap;
     let symbols: SymbolInfo[] = base.symbols;
-    const warnings = [...base.warnings];
     let rewritten = 0;
 
     // Bottom-up, so earlier blocks keep their line numbers while later ones are spliced.
@@ -183,17 +211,45 @@ export class HybridTranslator implements Translator {
         map = [...map.slice(0, a), ...newMap, ...map.slice(b + 1)];
         rewritten += 1;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        warnings.push(`${input.relativePath}:${block.defLine}: kept the rules translation of ${block.name}(): ${msg}`);
-        if (err instanceof OllamaError && err.unreachable) {
-          this.unreachableUntil = Date.now() + UNREACHABLE_BACKOFF_MS;
-          break;
-        }
+        this.recordFailure(err, warnings, `${input.relativePath}:${block.defLine}: kept the rules translation of ${block.name}()`);
+        if (err instanceof OllamaError && err.unreachable) break;
       }
     }
+    return rewritten ? { java: lines.join('\n'), sourceMap: map, symbols } : undefined;
+  }
 
-    if (rewritten && lines[1]) lines[1] = lines[1].replace('(rules engine)', `(rules engine + ${this.options.model})`);
-    return { java: lines.join('\n'), sourceMap: map, symbols, warnings, engine: 'hybrid' };
+  /**
+   * Swap the rules' Python-shaped imports for real Java ones. What the JDK index and the project
+   * scan resolve needs no model; only the names left over are sent, and the answer is verified.
+   */
+  private async resolveImports(input: TranslateInput, view: JavaView, warnings: string[]): Promise<{ view: JavaView; usedModel: boolean }> {
+    const modules = input.knownMembers?.modules ?? {};
+    const plan = planImports(view, input.source, modules, input.knownMembers?.classes);
+    let fromModel: ModelImports | undefined;
+    if (askable(plan).length && Date.now() >= this.unreachableUntil) {
+      try {
+        const answer = await this.ask(IMPORTS_SYSTEM_PROMPT, importsPrompt(input.relativePath, plan), (text) => text.trim().length > 0);
+        fromModel = acceptModelImports(answer, plan, modules);
+        if (fromModel.rejected.length) {
+          warnings.push(`${input.relativePath}: ignored imports suggested by ${this.options.model}: ${fromModel.rejected.join('; ')}`);
+        }
+      } catch (err) {
+        this.recordFailure(err, warnings, `${input.relativePath}: could not ask for the missing Java imports`);
+      }
+    }
+    const found = new Set([...(fromModel?.jdk ?? []), ...(fromModel?.library ?? [])].map((f) => f.split('.').pop()!));
+    // Decorators kept as annotations are only listed in the view; a warning per file would be noise.
+    const missing = askable(plan).filter((u) => !found.has(u.name)).map((u) => u.name);
+    if (missing.length) warnings.push(`${input.relativePath}: no Java import found for ${missing.join(', ')}`);
+    const usedModel = Boolean(fromModel && fromModel.jdk.length + fromModel.library.length);
+    return { view: applyImports(view, plan, renderImports(plan, fromModel, this.options.model)), usedModel };
+  }
+
+  /** Record a failed model call as a warning; an unreachable server pauses further calls for a while. */
+  private recordFailure(err: unknown, warnings: string[], what: string): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    warnings.push(`${what}: ${msg}`);
+    if (err instanceof OllamaError && err.unreachable) this.unreachableUntil = Date.now() + UNREACHABLE_BACKOFF_MS;
   }
 
   /** The model's cleaned answer for one function, from the cache when possible. */
@@ -205,13 +261,18 @@ export class HybridTranslator implements Translator {
     const draftText = draft.join('\n');
     const user = `File: ${input.relativePath}\nReason for rewrite: ${block.reason}\n\nPython function:\n${numbered}\n\nRule-based draft:\n${draftText}`;
 
-    const key = crypto.createHash('sha1').update(`${this.options.model}\n${SYSTEM_PROMPT}\n${user}`).digest('hex');
+    return this.ask(SYSTEM_PROMPT, user, looksLikeJava);
+  }
+
+  /** The model's cleaned answer to one prompt, from the cache when possible; `usable` rejects bad answers before they are cached. */
+  private async ask(system: string, user: string, usable: (answer: string) => boolean): Promise<string> {
+    const key = crypto.createHash('sha1').update(`${this.options.model}\n${system}\n${user}`).digest('hex');
     this.loadCache();
     const cached = this.cache.get(key);
     if (cached) return cached;
 
-    const answer = cleanAnswer(await this.chat(this.options, SYSTEM_PROMPT, user));
-    if (!looksLikeJava(answer)) throw new Error('the model returned text that is not usable Java');
+    const answer = cleanAnswer(await this.chat(this.options, system, user));
+    if (!usable(answer)) throw new Error('the model returned text that is not usable Java');
     this.cache.set(key, answer);
     this.saveCache();
     return answer;

@@ -24,6 +24,7 @@ import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, T
 import { FieldInfo, KnownMembers, MemberScan, classNameOf, collectSelfFields, elementTypeOf, inferTypeFromMaskedValue, mapTypesOf, scanMembers, toKnownMembers, typeFromDefault } from './members';
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
 import { DEFAULT_LINE_WIDTH, formatJavaLine } from './layout';
+import { codeOnly } from '../imports/javaImports';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
 
@@ -565,7 +566,15 @@ class RuleTranslation {
     }
     header.push({ text: '', py: 0 });
     header.push(...this.moduleDoc);
-    header.push({ text: `public final class ${this.moduleClass} {`, py: 0 });
+    const promoted = this.promoteModuleNamedClass();
+    this.terminateEnumConstants(Boolean(promoted && /^public enum\b/.test(promoted.header.text)));
+    if (promoted) {
+      // The module's Javadoc and the class's would read as one; keep them apart.
+      if (this.moduleDoc.length && promoted.lead.some((l) => l.text.startsWith('/**'))) header.push({ text: '', py: 0 });
+      header.push(...promoted.lead, promoted.header);
+    } else {
+      header.push({ text: `public final class ${this.moduleClass} {`, py: 0 });
+    }
 
     // Trim trailing blank lines from body
     while (this.out.length && this.out[this.out.length - 1].text === '') this.out.pop();
@@ -587,7 +596,7 @@ class RuleTranslation {
       for (let k = 0; k < count; k += 1) sourceMap.push(l.py);
     }
     const symbols: SymbolInfo[] = [
-      { name: this.moduleClass, kind: 'class', container: [], javaLine: physicalLineOf[header.length - 1], pythonLine: 1 },
+      { name: this.moduleClass, kind: 'class', container: [], javaLine: physicalLineOf[header.length - 1], pythonLine: promoted?.header.py ?? 1, ...(promoted && { pythonClass: true }) },
       ...this.symbols.map((s) => ({ name: s.name, kind: s.kind, container: s.container, javaLine: physicalLineOf[header.length + s.javaLineRaw], pythonLine: s.py })),
     ];
     return {
@@ -597,6 +606,102 @@ class RuleTranslation {
       warnings: this.warnings,
       engine: 'rules',
     };
+  }
+
+  /**
+   * Enum constants are written `NAME(value),`. When members follow them, Java needs the list to
+   * end with `;` instead, so the last constant's comma becomes a semicolon.
+   */
+  private terminateEnumConstants(promotedEnum: boolean): void {
+    const out = this.out;
+    // Each enum body: where it starts, and the closing line that ends it (absent for the module's own enum).
+    const bodies: { from: number; close?: string }[] = promotedEnum ? [{ from: 0 }] : [];
+    out.forEach((l, h) => {
+      const header = /^(\s*)(public )?enum\s.*\{/.exec(l.text);
+      if (header) bodies.push({ from: h + 1, close: `${header[1]}}` });
+    });
+    for (const { from, close } of bodies) {
+      let last = -1;
+      let k = from;
+      for (; k < out.length; k += 1) {
+        const t = out[k].text;
+        if (t === '' || /^\s*\/\//.test(t)) continue;
+        if (!/^\s*[A-Z_][A-Z0-9_]*(\(.*\))?,(\s*\/\/.*)?$/.test(t)) break;
+        last = k;
+      }
+      if (last < 0 || k >= out.length || out[k].text === close) continue;
+      out[last] = { ...out[last], text: out[last].text.replace(/,(\s*\/\/.*)?$/, ';$1') };
+    }
+  }
+
+  /**
+   * `order_service.py` declaring `class OrderService` would give `OrderService.OrderService`, which
+   * Java rejects (a nested class cannot share its enclosing class's name). Instead that class
+   * becomes the module's class: its Javadoc, annotations and header move to the top, its body is
+   * dedented one level, and the module's constants and functions stay around it as static
+   * members. An enum's body moves to the top, since its constants must come first.
+   * Returns the lines that replace the module class header, or undefined when there is no such class.
+   */
+  private promoteModuleNamedClass(): { lead: OutLine[]; header: OutLine } | undefined {
+    const symbol = this.symbols.find((s) => s.kind === 'class' && s.name === this.moduleClass && s.container.length === 1);
+    if (!symbol) return undefined;
+    const h = symbol.javaLineRaw;
+    const out = this.out;
+    if (!/^ {4}public\b.*\b(class|enum|interface)\s/.test(out[h]?.text ?? '')) return undefined;
+
+    // The class's closing brace: the line where the brace depth opened at the header returns to 0.
+    let depth = 0;
+    let end = -1;
+    for (let k = h; k < out.length && end < 0; k += 1) {
+      for (const code of codeOnly(out[k].text.split('\n'))) {
+        for (const ch of code) depth += ch === '{' ? 1 : ch === '}' ? -1 : 0;
+      }
+      if (k > h && depth === 0) end = k;
+    }
+    if (end < 0 || out[end].text.trim() !== '}') return undefined;
+
+    // Javadoc, annotations and block comments directly above the header belong to the class.
+    let start = h;
+    while (start > 0 && /^ {4}(@|\/\*| \*)/.test(out[start - 1].text)) start -= 1;
+
+    const dedent = (l: OutLine): OutLine => ({ text: l.text.split('\n').map((t) => t.replace(/^ {4}/, '')).join('\n'), py: l.py });
+    const lead = out.slice(start, h).map(dedent);
+    const headerText = out[h].text.trim().replace(/^public (abstract )?static class\b/, 'public $1class');
+    const header = { text: headerText, py: out[h].py };
+    const isEnum = /^public enum\b/.test(headerText);
+
+    // New order of the old entries (by index); -1 marks the promoted class's own lines.
+    const inner = Array.from({ length: end - h - 1 }, (_, k) => h + 1 + k);
+    const before = Array.from({ length: start }, (_, k) => k);
+    const after = Array.from({ length: out.length - end - 1 }, (_, k) => end + 1 + k);
+    const order = isEnum ? [...inner, ...before, ...after] : [...before, ...inner, ...after];
+    const kept: number[] = [];
+    for (const k of order) {
+      // No blank line first in the body, and never two in a row where the class was cut out.
+      const prev = kept.length ? out[kept[kept.length - 1]].text : '';
+      if (out[k].text === '' && (!kept.length || prev === '')) continue;
+      kept.push(k);
+    }
+    if (isEnum && kept.length > inner.length) {
+      // Keep a blank line between the enum's own members and the module's.
+      const firstModule = kept.findIndex((k) => k < h || k > end);
+      if (firstModule > 0 && out[kept[firstModule]].text !== '') kept.splice(firstModule, 0, -2);
+    }
+    const newIndex = new Map<number, number>();
+    const rebuilt: OutLine[] = kept.map((k, n) => {
+      if (k === -2) return { text: '', py: 0 };
+      newIndex.set(k, n);
+      return k > h && k < end ? dedent(out[k]) : out[k];
+    });
+    out.splice(0, out.length, ...rebuilt);
+
+    const symbols = this.symbols.filter((s) => s !== symbol && newIndex.has(s.javaLineRaw));
+    for (const s of symbols) {
+      s.javaLineRaw = newIndex.get(s.javaLineRaw)!;
+      if (s.container[1] === this.moduleClass) s.container = [this.moduleClass, ...s.container.slice(2)];
+    }
+    this.symbols.splice(0, this.symbols.length, ...symbols);
+    return { lead, header };
   }
 
   private translateCode(i: number): void {
