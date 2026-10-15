@@ -8,6 +8,14 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **Nullable primitives are boxed.** A Java primitive cannot hold `null`, so a
+  value the Python code may set to `None` is declared with its wrapper type
+  (`int` -> `Integer`, `float` -> `Double`, `bool` -> `Boolean`):
+  `Optional[int]` / `int | None` hints, `x: int = None`, parameters defaulting
+  to `None` or checked with `is None`, locals assigned `None` anywhere in the
+  function (`n = 0 ... n = None` -> `Integer n = 0`; `x = None ... x = 0` ->
+  `Integer x = null`), return types of functions that `return None`, and
+  `self.x` fields set to or compared with `None`.
 - **`hybrid` engine (Phase 2): rules + a local Ollama model.** The rules engine
   still translates every file; only functions it handles badly (a warning, an
   untranslated statement, nested comprehensions, walrus) are rewritten by the model. Fails soft: an

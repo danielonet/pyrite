@@ -15,6 +15,7 @@ import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { splitTopLevel, translateType } from './typeHints';
 import { indexAtDepth0 } from './expressions';
+import { boxIfNullable, nullableSelfFields, scanNullability } from './nullability';
 
 export interface PropertyInfo {
   name: string;
@@ -182,6 +183,9 @@ export function collectSelfFields(lines: LogicalLine[], i: number, resolve?: Val
       seen.set(m[1], { name: m[1], type: type === 'var' ? 'Object' : type, py: l.startLine, where: currentDef ? `${currentDef}()` : 'class body' });
     }
   }
+  // A field the class sets to None (or checks against None) cannot be a Java primitive.
+  const nullable = nullableSelfFields(lines, i);
+  for (const f of seen.values()) f.type = boxIfNullable(f.type, nullable.has(f.name));
   return [...seen.values()];
 }
 
@@ -235,7 +239,8 @@ export function scanMembers(lines: LogicalLine[]): MemberScan {
     }
     if ((m = /^(?:async\s+)?def\s+(\w+)\s*(?:\[[^\]]*\])?\s*\((.*)\)\s*(?:->\s*(.+?))?\s*:$/.exec(code))) {
       const [, name, params, hint] = m;
-      const ret = hint ? translateType(unmask(hint)) : undefined;
+      // `-> int` with a `return None` somewhere is declared `Integer`, as the translator does.
+      const ret = hint ? boxIfNullable(translateType(unmask(hint)), scanNullability(bodyLines(lines, i), l.indent).returnsNone) : undefined;
       if (atMemberLevel) {
         const cls = enclosing!.members;
         const isGetter = decorators.some((d) => /^@(cached_)?property\b/.test(d));

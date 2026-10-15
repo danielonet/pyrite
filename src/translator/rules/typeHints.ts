@@ -2,7 +2,7 @@
  * Maps Python type hints to Java-flavored type names.
  *
  *   int -> int, str -> String, list[int] -> List<Integer>, dict[str, Any] -> Map<String, Object>,
- *   Optional[Order] -> Order /* nullable *\/, None -> void, Callable[[A, B], R] -> BiFunction<A, B, R>
+ *   Optional[Order] -> Order /* nullable *\/, Optional[int] -> Integer /* nullable *\/, None -> void, Callable[[A, B], R] -> BiFunction<A, B, R>
  */
 
 const PRIMITIVES: Record<string, string> = {
@@ -68,6 +68,11 @@ export function boxed(t: string): string {
   return BOXED[t] ?? t;
 }
 
+/** A type that may hold None: Java primitives cannot hold null, so they are boxed. */
+function nullable(t: string): string {
+  return `${boxed(t)} /* nullable */`;
+}
+
 /**
  * Split a comma separated list at bracket depth 0. Only `[] () {}` nest: in Python `<` and `>`
  * are comparison operators (`return a > b, c`), and by the time Java generics exist in the text
@@ -103,7 +108,7 @@ export function translateType(hint: string | undefined | null, opts: { box?: boo
   if (unionParts.length > 1) {
     const nonNull = unionParts.filter((p) => p !== 'None');
     if (nonNull.length === 1) {
-      return `${translateType(nonNull[0], opts)} /* nullable */`;
+      return nullable(translateType(nonNull[0], opts));
     }
     return `Object /* ${unionParts.map((p) => translateType(p, opts)).join(' | ')} */`;
   }
@@ -114,10 +119,10 @@ export function translateType(hint: string | undefined | null, opts: { box?: boo
     const args = splitTopLevel(generic[2]);
     switch (head) {
       case 'Optional':
-        return `${translateType(args[0], opts)} /* nullable */`;
+        return nullable(translateType(args[0], opts));
       case 'Union': {
         const nonNull = args.filter((p) => p !== 'None');
-        if (nonNull.length === 1) return `${translateType(nonNull[0], opts)} /* nullable */`;
+        if (nonNull.length === 1) return nullable(translateType(nonNull[0], opts));
         return `Object /* ${args.map((a) => translateType(a, opts)).join(' | ')} */`;
       }
       case 'Literal':

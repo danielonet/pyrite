@@ -1417,3 +1417,74 @@ test('a view left under the old file name is removed when the module is regenera
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('nullable primitives: Optional hints box the primitive', () => {
+  assert.equal(translateType('Optional[int]'), 'Integer /* nullable */');
+  assert.equal(translateType('float | None'), 'Double /* nullable */');
+  assert.equal(translateType('Union[bool, None]'), 'Boolean /* nullable */');
+  assert.equal(translateType('Optional[str]'), 'String /* nullable */');
+});
+
+test('nullable primitives: parameters, returns and locals the code flow sets to None are boxed', () => {
+  const out = java(`
+def find(key: str, default: int = None) -> int:
+    if key == "x":
+        return None
+    return 3
+
+def scan(limit: int, flag: bool) -> float:
+    if limit is None:
+        limit = 10
+    found = None
+    for i in range(limit):
+        found = 0
+    n = 0
+    if flag:
+        n = None
+    k = 5
+    total: int = None
+    return 1.0
+`);
+  contains(out, 'public static Integer /* nullable */ find(String key, Integer /* nullable */ default /* = null */)');
+  contains(out, 'public static double scan(Integer /* nullable */ limit, boolean flag)');
+  contains(out, 'Integer /* nullable */ found = null;');
+  contains(out, 'Integer /* nullable */ n = 0;');
+  contains(out, 'int k = 5;');
+  contains(out, 'Integer /* nullable */ total = null;');
+});
+
+test('nullable primitives: fields set to or checked against None are boxed', () => {
+  const out = java(`
+class Counter:
+    limit: float = None
+
+    def __init__(self, start: int):
+        self.count = start
+        self.best = 0
+        self.ratio = 1.5
+
+    def reset(self):
+        self.count = None
+
+    def has_best(self) -> bool:
+        return self.best is not None
+`);
+  contains(out, 'public Integer /* nullable */ count;');
+  contains(out, 'public Integer /* nullable */ best;');
+  contains(out, 'public double ratio;');
+  contains(out, 'Double /* nullable */ limit = null;');
+  contains(out, 'public boolean has_best()');
+});
+
+test('nullable primitives: a nested function does not leak its None flow into the outer one', () => {
+  const out = java(`
+def outer() -> int:
+    n = 1
+    def inner():
+        n = None
+        return None
+    return n
+`);
+  contains(out, 'public static int outer()');
+  contains(out, 'int n = 1;');
+});

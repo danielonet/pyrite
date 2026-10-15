@@ -25,6 +25,7 @@ import { FieldInfo, KnownMembers, MemberScan, classNameOf, collectSelfFields, el
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
 import { DEFAULT_LINE_WIDTH, formatJavaLine } from './layout';
 import { codeOnly } from '../imports/javaImports';
+import { NullabilityScan, boxIfNullable, nullableType, scanNullability } from './nullability';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
 
@@ -40,6 +41,8 @@ interface Block {
   declared?: Set<string>;
   /** Java types of parameters and locals declared in this function scope. */
   types?: Map<string, string>;
+  /** Names in this function scope that the code flow may set to None (declared boxed). */
+  nullability?: NullabilityScan;
   /** Python field name -> Java field name, for backing fields renamed after their property (Lombok style). */
   fieldRenames?: Map<string, string>;
   /** Name bound by `except ... as name` for this catch block. */
@@ -1192,6 +1195,9 @@ class RuleTranslation {
     const docLine = doc >= 0 ? this.lines[doc] : undefined;
     if (doc >= 0 && this.javadocMode !== 'none') this.skipIndex = doc;
 
+    // Which names the body may set to None: their primitive types are boxed (int -> Integer).
+    const nullability = scanNullability(this.bodyLines(i), line.indent, this.inlineBody !== undefined ? splitTopLevel(this.inlineBody, ';') : []);
+
     // parameters
     const declared = new Set<string>();
     const types = new Map<string, string>();
@@ -1226,7 +1232,8 @@ class RuleTranslation {
       const [, pname, hint, def] = parsed;
       declared.add(pname);
       let type = hint ? translateType(hint) : def ? typeFromDefault(def) : 'Object';
-      if (def !== undefined && def.trim() === 'None' && !/nullable/.test(type)) type += ' /* nullable */';
+      if (def !== undefined && def.trim() === 'None') type = nullableType(type);
+      else type = boxIfNullable(type, nullability.names.has(pname));
       params.push(def !== undefined ? `${type} ${pname} /* = ${this.expr(def)} */` : `${type} ${pname}`);
       if (type !== 'Object') types.set(pname, type);
       paramNames.push(pname);
@@ -1256,6 +1263,7 @@ class RuleTranslation {
       if (isAbstract) modifiers.push('abstract');
       if (cls?.isInterface) modifiers = [];
     }
+    if (!isCtor) ret = boxIfNullable(ret, nullability.returnsNone);
     if (isAsync) ret = ret === 'void' ? 'CompletableFuture<Void> /* async */' : `CompletableFuture<${boxed(ret)}> /* async */`;
 
     if (this.wantsJavadoc(doc >= 0)) {
@@ -1289,7 +1297,7 @@ class RuleTranslation {
       // Unusual: abstract method with a real body - reopen as a block.
       this.out[this.out.length - 1].text = this.out[this.out.length - 1].text.replace(/;(\s*\/\/.*)?$/, ' {$1');
     }
-    this.stack.push({ indent: line.indent, kind: 'def', declared, types });
+    this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability });
   }
 
   private skipRanges: Array<[number, number]> = [];
@@ -1646,7 +1654,7 @@ class RuleTranslation {
     if (!scope) {
       // module level
       const isConst = /^[A-Z][A-Z0-9_]*$/.test(name);
-      const t = type === 'var' ? 'Object' : type;
+      const t = boxIfNullable(type === 'var' ? 'Object' : type, valueJava === 'null');
       if (t !== 'Object') this.scan.moduleTypes.set(name, t);
       this.emit(`${isConst ? 'public static final' : 'static'} ${t} ${name}${rhs};${comment}`, py);
       this.recordSymbol(name, 'field', py);
@@ -1658,7 +1666,7 @@ class RuleTranslation {
         this.recordSymbol(name, 'field', py);
         return;
       }
-      const t = type === 'var' ? 'Object' : type;
+      const t = boxIfNullable(type === 'var' ? 'Object' : type, valueJava === 'null');
       const isConst = /^[A-Z][A-Z0-9_]*$/.test(name);
       const visibility = name.startsWith('__') ? 'private' : name.startsWith('_') ? 'protected' : 'public';
       const modifiers = scope.isRecord ? [visibility] : [visibility, 'static', ...(isConst ? ['final'] : [])];
@@ -1673,7 +1681,12 @@ class RuleTranslation {
       this.emit(`${name}${rhs};${comment}`, py);
     } else {
       declared.add(name);
-      const t = type === 'Object' ? 'var' : type;
+      let t = type === 'Object' ? 'var' : type;
+      const mayBeNone = valueJava === 'null' || scope.nullability?.names.has(name) === true;
+      // `x = None` now, a literal later: declare it with the later type, boxed (`Integer x = null`).
+      const later = scope.nullability?.laterTypes.get(name);
+      if (/^Object \/\* nullable \*\/$/.test(t) && later) t = nullableType(later);
+      else t = boxIfNullable(t, mayBeNone);
       if (t !== 'var') scope.types?.set(name, t);
       this.emit(`${valueJava === undefined ? (t === 'var' ? 'Object' : t) : t} ${name}${rhs};${comment}`, py);
     }
