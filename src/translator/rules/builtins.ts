@@ -9,7 +9,7 @@
  */
 
 import { PLACEHOLDER_RE } from './strings';
-import { splitTopLevel } from './typeHints';
+import { boxed, splitTopLevel, translateType } from './typeHints';
 
 export interface CallContext {
   /** The Java-rendered literal behind a placeholder token, e.g. `"name"`, or undefined when unknown. */
@@ -146,8 +146,11 @@ const HANDLERS: Record<string, Handler> = {
   range: (args, _kw, _ctx, raw) => (args.length ? rangeToIntStream(raw) : undefined),
   isinstance: ([x, t]) => {
     if (!x || !t) return undefined;
-    const types = wrappedInParens(t.trim()) ? splitTopLevel(t.trim().slice(1, -1)) : [t.trim()];
-    const tests = types.map((ty) => `${x} instanceof ${ty}`);
+    // `isinstance(x, (A, B))`: the tuple of types arrives as `Tuple.of(A, B)` or still in parentheses.
+    const tuple = /^Tuple\.of\((.*)\)$/.exec(t.trim());
+    const types = tuple ? splitTopLevel(tuple[1]) : wrappedInParens(t.trim()) ? splitTopLevel(t.trim().slice(1, -1)) : [t.trim()];
+    // Builtin types have a Java class to test against: int -> Integer, str -> String, list -> List<?>.
+    const tests = types.map((ty) => `${x} instanceof ${/^[a-z]\w*$/.test(ty.trim()) ? boxed(translateType(ty)) : ty}`);
     return tests.length === 1 ? tests[0] : `(${tests.join(' || ')})`;
   },
   getattr: ([o, name, dflt], _kw, ctx) => {

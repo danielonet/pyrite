@@ -28,7 +28,7 @@ import { codeOnly } from '../imports/javaImports';
 import { NullabilityScan, boxIfNullable, nullableType, scanNullability } from './nullability';
 import { UNDERSCORE_NAME, renameJavaReservedIdentifiers } from './javaNames';
 
-type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
+type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'static' | 'other';
 
 interface Block {
   indent: number;
@@ -46,6 +46,12 @@ interface Block {
   nullability?: NullabilityScan;
   /** Python field name -> Java field name, for backing fields renamed after their property (Lombok style). */
   fieldRenames?: Map<string, string>;
+  /** Static field names a class declares so far (class blocks). */
+  fields?: Set<string>;
+  /** Index in the output of a `static {` block's opening line (static blocks). */
+  startOut?: number;
+  /** Locals this block declares (unpacked loop targets): out of scope in Java once it closes. */
+  blockLocals?: string[];
   /** Name bound by `except ... as name` for this catch block. */
   catchVar?: string;
   /** pyrite.lombokStyle plan for this class, if any boilerplate here can be collapsed. */
@@ -135,6 +141,37 @@ function typeParamsOf(bracketed: string | undefined): string[] {
 }
 
 /** Remove one pair of enclosing parentheses when they wrap the whole text. */
+/** Index just past the bracket group that opens `text` (`(...)`, `[...]`), or -1. */
+function groupEndIndex(text: string): number {
+  const open = text[0];
+  const close = open === '(' ? ')' : open === '[' ? ']' : '';
+  if (!close) return -1;
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '(' || text[i] === '[' || text[i] === '{') depth += 1;
+    else if (text[i] === ')' || text[i] === ']' || text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The targets of an unpacking assignment or loop (`a, b`, `(a, b)`, `[a, *rest]`, `x.y, d[k]`),
+ * or undefined when `target` is a single target or has nested tuples.
+ */
+function unpackTargets(target: string): string[] | undefined {
+  let t = target.trim();
+  if (/^[(\[]/.test(t) && groupEndIndex(t) === t.length) t = t.slice(1, -1);
+  const parts = splitTopLevel(t);
+  const trailingComma = /,\s*$/.test(t);
+  if (parts.length < 2 && !trailingComma) return undefined;
+  if (!parts.every((p) => /^\*?[\w.]+$/.test(p) || /^[\w.]+\[.+\]$/.test(p))) return undefined;
+  if (parts.filter((p) => p.startsWith('*')).length > 1) return undefined;
+  return parts;
+}
+
 function stripOuterParens(text: string): string {
   const t = text.trim();
   if (!t.startsWith('(') || !t.endsWith(')')) return t;
@@ -238,7 +275,7 @@ class RuleTranslation {
   private enclosingScope(): Block | undefined {
     for (let i = this.stack.length - 1; i >= 0; i -= 1) {
       const k = this.stack[i].kind;
-      if (k === 'def' || k === 'main' || k === 'class') return this.stack[i];
+      if (k === 'def' || k === 'main' || k === 'class' || k === 'static') return this.stack[i];
     }
     return undefined;
   }
@@ -418,6 +455,7 @@ class RuleTranslation {
   private closeBlocksTo(indent: number, continuation: boolean): void {
     while (this.stack.length > 0 && this.top()!.indent >= indent) {
       const block = this.stack.pop()!;
+      for (const name of block.blockLocals ?? []) this.enclosingScope()?.declared?.delete(name);
       if (continuation && block.indent === indent) {
         this.lastClosedKind = block.kind;
         return; // the continuation header emits "} else {" itself
@@ -739,6 +777,7 @@ class RuleTranslation {
       if (comment) this.emit(comment.trim(), py);
       return;
     }
+    if (!continuation) this.placeInStaticBlock(code, py);
 
     // `if x: return 1`, `except: pass`, `def f(): return 1` - a compound statement with its body
     // on the same line. The header opens the block as usual; the body is translated inside it,
@@ -1007,7 +1046,7 @@ class RuleTranslation {
     for (const [propName, plan] of lombokPlan?.properties ?? []) {
       if (plan.field !== propName && !fields.some((f) => f.name === propName)) fieldRenames.set(plan.field, propName);
     }
-    const block: Block = { indent: line.indent, kind: 'class', className: name, isEnum, isRecord, isInterface, lombokPlan, fieldRenames };
+    const block: Block = { indent: line.indent, kind: 'class', className: name, isEnum, isRecord, isInterface, lombokPlan, fieldRenames, fields: new Set() };
     this.stack.push(block);
 
     if (!isEnum) {
@@ -1354,6 +1393,7 @@ class RuleTranslation {
     const targets = splitTopLevel(stripOuterParens(target)).map((t) => t.trim());
     const scope = this.enclosingScope();
     const declared = scope?.declared;
+    const declaredBefore = new Set(targets.filter((t) => declared?.has(t)));
     targets.forEach((t) => declared?.add(t));
     // Element type from the iterable's type: List<Order> -> Order, Map<K, V>.items() -> K, V.
     const iterMasked = maskedIterable.trim();
@@ -1418,13 +1458,26 @@ class RuleTranslation {
       }
     }
     // Iterating a Map in Python walks its keys.
-    const iter = this.expr(iterable) + (mapTypes && !view ? '.keySet()' : '');
+    // A tuple literal walked by a loop is a plain collection: `for x in (a, b)` -> List.of(a, b).
+    const iter = this.expr(iterable).replace(/^Tuple\.of\(/, 'List.of(') + (mapTypes && !view ? '.keySet()' : '');
     if (targets.length === 1) {
       this.emit(`for (${typed(targets[0], elem)} : ${iter}) {${asyncNote}${comment}`, py);
-    } else {
-      this.emit(`for (var (${targets.join(', ')}) : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
+      this.stack.push({ indent: line.indent, kind: 'for' });
+      return;
     }
-    this.stack.push({ indent: line.indent, kind: 'for' });
+    const unpack = unpackTargets(target);
+    if (!unpack) {
+      this.emit(`for (var (${targets.join(', ')}) : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
+      this.stack.push({ indent: line.indent, kind: 'for' });
+      return;
+    }
+    // `for a, b in pairs:` walks the tuples and unpacks each one at the top of the body.
+    for (const t of unpack) if (!declaredBefore.has(t.replace(/^\*/, ''))) declared?.delete(t.replace(/^\*/, ''));
+    const item = this.freeLocalName('item');
+    this.emit(`for (var ${item} : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
+    const blockLocals = unpack.map((t) => t.replace(/^\*/, '')).filter((t) => /^\w+$/.test(t) && !declaredBefore.has(t));
+    this.stack.push({ indent: line.indent, kind: 'for', blockLocals });
+    for (const l of this.unpackingLines(unpack, item, lits)) this.emit(l, py);
   }
 
   /**
@@ -1550,6 +1603,7 @@ class RuleTranslation {
         return this.emit(`${recv}.${setter}(${recv}.${this.propertyGetter(attr[2])} ${op} ${value});${comment}`, py);
       }
       const t = ex(target);
+      if (/^\w+$/.test(target) && this.enclosingScope()?.kind === 'static') this.makeFieldMutable(target);
       if (op === '**') return this.emit(`${t} = Math.pow(${t}, ${value});${comment}`, py);
       if (op === '//') return this.emit(`${t} = Math.floorDiv(${t}, ${value});${comment}`, py);
       return this.emit(`${t} ${op}= ${value};${comment}`, py);
@@ -1607,8 +1661,10 @@ class RuleTranslation {
     if (/^TypeVar\(/.test(valueMasked.trim()) && segments.length === 1) {
       return this.emit(`// type variable ${segments[0]} = ${un(valueMasked)}${comment}`, py);
     }
-    let valueJava = exValue(valueMasked);
-    let valueMaskedForType = valueMasked;
+    // `x = a, b` builds a tuple, like `x = (a, b)`.
+    const bareTuple = !/^lambda\b/.test(valueMasked.trim()) && splitTopLevel(valueMasked).length > 1;
+    let valueJava = bareTuple ? `Tuple.of(${splitTopLevel(valueMasked).map(exValue).join(', ')})` : exValue(valueMasked);
+    let valueMaskedForType = bareTuple ? `(${valueMasked})` : valueMasked;
 
     let m: RegExpExecArray | null;
     for (let s = segments.length - 1; s >= 0; s -= 1) {
@@ -1631,12 +1687,8 @@ class RuleTranslation {
         this.emit(`this.${renamed} = ${valueJava}; // ${translateType(un(m[2]))}${comment}`, py);
       } else if (/^\w+$/.test(target)) {
         this.emitFieldOrLocal(target, this.inferValueType(valueMaskedForType, lits), valueJava, py, comment);
-      } else if (/^\(?[\w.]+(\s*,\s*[\w.]+)+\)?$/.test(target) || /^\[.*\]$/.test(target) && !/^\w+\[/.test(target)) {
-        const names = splitTopLevel(target.replace(/^[(\[]|[)\]]$/g, '')).map((n) => n.trim());
-        const scope = this.enclosingScope();
-        const isNew = names.every((n) => !scope?.declared?.has(n));
-        names.forEach((n) => scope?.declared?.add(n));
-        this.emit(`${isNew ? 'var ' : ''}(${names.join(', ')}) = ${valueJava}; // tuple unpacking${comment}`, py);
+      } else if (unpackTargets(target)) {
+        this.emitUnpacking(unpackTargets(target)!, valueMasked, lits, py, comment);
       } else {
         const sub = /^(.+)\[(.+)\]$/.exec(target);
         const attr = /^(.+)\.(\w+)$/.exec(target);
@@ -1669,6 +1721,188 @@ class RuleTranslation {
     return `null /* field(${unmaskStrings(argsText, lits)}) */`;
   }
 
+  /** Names of the module class's static fields declared so far. */
+  private moduleFields = new Set<string>();
+
+  /**
+   * Java has no statements in a class body: module- and class-level code that is not a
+   * declaration (a call, `del`, `obj.attr = ...`, `if`/`for`/`try`, reassigning a field) goes
+   * into a `static { }` block. Consecutive statements share one block; a declaration closes it,
+   * so everything still runs in the Python order (Java runs static initializers top to bottom).
+   * Enums (constants come first) and interfaces (no static blocks) keep their statements as is.
+   */
+  private placeInStaticBlock(code: string, py: number): void {
+    const top = this.top();
+    const level = top?.kind === 'static' ? this.stack[this.stack.length - 2] : top;
+    if (level !== undefined && level.kind !== 'class') return; // inside a function or a block
+    if (level?.isEnum || level?.isInterface) return;
+    const executable = this.isStatementAtBodyLevel(code, level);
+    if (executable && top?.kind !== 'static') {
+      this.emit('static {', py);
+      this.stack.push({ indent: level ? level.indent + 1 : -1, kind: 'static', declared: new Set(), types: new Map(), startOut: this.out.length - 1 });
+    } else if (!executable && top?.kind === 'static') {
+      this.stack.pop();
+      // A blank line before the next declaration belongs after the block, not inside it.
+      const blank = this.out[this.out.length - 1]?.text === '';
+      if (blank) this.out.pop();
+      this.emit('}', 0);
+      if (blank) this.emit('', 0, 0);
+    }
+  }
+
+  /** Whether a module/class-level statement must run in a static block (it is not a declaration). */
+  private isStatementAtBodyLevel(code: string, level: Block | undefined): boolean {
+    if (code.startsWith('@') || /^(?:class|def|async\s+def)\s/.test(code) || /^(?:import|from)\s/.test(code)) return false;
+    if (/^if\s+__name__\s*==/.test(code) || code === 'pass' || code === '...' || isSingleLiteral(code)) return false;
+    const keyword = /^(?:if|elif|else|for|while|with|try|except|finally|match|case|lambda|return|async|assert|del|raise|global|nonlocal|yield|await)\b/;
+    if (keyword.test(code)) return true;
+    const fields = level?.fields ?? this.moduleFields;
+    const eq = this.assignmentIndex(code);
+    if (eq < 0) return !/^\w+\s*:\s*[^=]+$/.test(code); // a bare annotation `x: int` declares a field
+    // `x = ...`, `x: T = ...`, `a = b = ...`, `a, b = ...`: a declaration, unless a target is not a
+    // plain name (`obj.attr = ...`, `d[k] = ...`) or the field exists already (a reassignment).
+    const names: string[] = [];
+    let rest = code;
+    for (let idx = eq; idx > 0; idx = this.assignmentIndex(rest)) {
+      const target = rest.slice(0, idx).trim();
+      rest = rest.slice(idx + 1).trim();
+      const single = /^(\w+)\s*(?::\s*.+)?$/.exec(target);
+      const many = single ? undefined : unpackTargets(target);
+      if (single) names.push(single[1]);
+      else if (many && many.every((t) => /^\*?\w+$/.test(t))) names.push(...many.map((t) => t.replace(/^\*/, '')));
+      else return true;
+    }
+    return names.some((n) => fields.has(n));
+  }
+
+  /**
+   * `name = value` inside a static block: module and class variables are fields, so a name the
+   * block assigns first is declared as a field just before the block (not final: Python may
+   * assign it again, e.g. in both `try` and `except`), then assigned here.
+   */
+  private assignInStaticBlock(scope: Block, name: string, type: string, valueJava: string | undefined, py: number, comment: string): void {
+    const level = this.stack[this.stack.indexOf(scope) - 1];
+    const fields = level?.kind === 'class' ? level.fields! : this.moduleFields;
+    if (!fields.has(name) && !scope.declared?.has(name)) {
+      const t = type === 'var' || /^Object\b/.test(type) ? 'Object' : type;
+      const at = scope.startOut!;
+      const indentation = /^\s*/.exec(this.out[at].text)![0];
+      this.out.splice(at, 0, { text: `${indentation}${level?.kind === 'class' ? 'public static' : 'static'} ${t} ${name};`, py });
+      for (const sym of this.symbols) if (sym.javaLineRaw >= at) sym.javaLineRaw += 1;
+      this.symbols.push({ name, kind: 'field', container: this.classChain(), javaLineRaw: at, py });
+      scope.startOut = at + 1;
+      fields.add(name);
+      if (level?.kind !== 'class' && t !== 'Object') this.scan.moduleTypes.set(name, t);
+    }
+    else this.makeFieldMutable(name);
+    if (valueJava !== undefined) this.emit(`${name} = ${valueJava};${comment}`, py);
+  }
+
+  /** Drop `final` from a field the code assigns again (`COUNT = 0` ... `COUNT += 1`). */
+  private makeFieldMutable(name: string): void {
+    const container = this.classChain();
+    const sym = [...this.symbols].reverse().find((s) => s.kind === 'field' && s.name === name && s.container.join('.') === container.join('.'));
+    if (sym && this.out[sym.javaLineRaw]) this.out[sym.javaLineRaw].text = this.out[sym.javaLineRaw].text.replace(/\bstatic final\b/, 'static');
+  }
+
+  /** `base`, or `base2`, `base3`, ... : a local name nothing in this function scope uses yet (then marked used). */
+  private freeLocalName(base: string): string {
+    const declared = this.enclosingScope()?.declared;
+    let name = base;
+    for (let n = 2; declared?.has(name) || this.scan.moduleTypes.has(name); n += 1) name = `${base}${n}`;
+    declared?.add(name);
+    return name;
+  }
+
+  /**
+   * Java statements that unpack the tuple or list `source` (a Java expression) into `targets`:
+   * `var a = pair.get(0);`, `rest = xs.subList(1, xs.size());`, `this.x = t.get(2);`.
+   * `_` targets (renamed `unused`) are skipped; names already declared get a plain assignment.
+   */
+  private unpackingLines(targets: string[], source: string, lits: string[]): string[] {
+    const ex = (s: string) => unmaskStrings(translateMaskedExpression(s, this.exprCtx(lits)), lits);
+    const star = targets.findIndex((t) => t.startsWith('*'));
+    const n = targets.length;
+    const out: string[] = [];
+    targets.forEach((raw, k) => {
+      const target = raw.replace(/^\*/, '');
+      if (target === UNDERSCORE_NAME) return;
+      const value =
+        k === star
+          ? `${source}.subList(${k}, ${source}.size()${n - k - 1 > 0 ? ` - ${n - k - 1}` : ''})`
+          : star >= 0 && k > star
+            ? `${source}.get(${source}.size() - ${n - k})`
+            : `${source}.get(${k})`;
+      out.push(this.assignmentLine(target, value, ex));
+    });
+    return out;
+  }
+
+  /** `target = value;` for one unpacking target: declares a new local, or assigns a field / item. */
+  private assignmentLine(target: string, value: string, ex: (s: string) => string): string {
+    const sub = /^(.+)\[(.+)\]$/.exec(target);
+    if (sub) return `${ex(sub[1])}.put(${ex(sub[2])}, ${value});`;
+    if (!/^\w+$/.test(target)) {
+      const attr = /^(.+)\.(\w+)$/.exec(target);
+      const setter = attr ? this.propertySetter(attr[2]) : undefined;
+      return attr && setter ? `${ex(attr[1])}.${setter}(${value});` : `${ex(target)} = ${value};`;
+    }
+    const declared = this.enclosingScope()?.declared;
+    if (declared?.has(target)) return `${target} = ${value};`;
+    declared?.add(target);
+    return `var ${target} = ${value};`;
+  }
+
+  /**
+   * `a, b = value` (also `(a, b) = ...`, `[a, b] = ...`, `first, *rest = ...`). Java has no
+   * destructuring, so this becomes one statement per name. A literal tuple of the same length
+   * that does not read any of the targets is assigned element by element; a plain name is read
+   * directly; anything else (a call, or a swap `a, b = b, a`) goes through a temporary first.
+   */
+  private emitUnpacking(targets: string[], valueMasked: string, lits: string[], py: number, comment: string): void {
+    const exValue = (s: string) => unmaskStrings(translateMaskedExpression(s, this.exprCtx(lits, true)), lits);
+    const scope = this.enclosingScope();
+    const inFunction = scope !== undefined && scope.kind !== 'class';
+    let v = valueMasked.trim();
+    if (/^[(\[]/.test(v) && groupEndIndex(v) === v.length) v = v.slice(1, -1);
+    const elems = splitTopLevel(v);
+    const names = targets.map((t) => t.replace(/^\*/, ''));
+    const readsTarget = elems.some((e) => names.some((name) => new RegExp(`(?<![\\w.])${name.replace(/[.[\]]/g, '\\$&')}(?![\\w])`).test(e)));
+
+    if (elems.length === targets.length && elems.length > 1 && !targets.some((t) => t.startsWith('*')) && !readsTarget) {
+      targets.forEach((t, k) => {
+        if (t === UNDERSCORE_NAME) return;
+        const value = exValue(elems[k]);
+        if (!inFunction && /^\w+$/.test(t)) this.emitFieldOrLocal(t, this.inferValueType(elems[k], lits), value, py, k === 0 ? comment : '');
+        else this.emit(`${this.assignmentLine(t, value, (s) => unmaskStrings(translateMaskedExpression(s, this.exprCtx(lits)), lits))}${k === 0 ? `${comment}` : ''}`, py);
+      });
+      return;
+    }
+
+    const whole = elems.length > 1 ? `Tuple.of(${elems.map(exValue).join(', ')})` : exValue(valueMasked);
+    let source = whole;
+    if (!/^[\w.]+$/.test(whole)) {
+      // Evaluate the value once.
+      source = this.freeLocalName('tuple');
+      if (inFunction) this.emit(`var ${source} = ${whole}; // tuple unpacking${comment}`, py);
+      else this.emitFieldOrLocal(source, 'Object', whole, py, ` // tuple unpacking${comment}`);
+    } else if (comment) {
+      this.emit(`// tuple unpacking${comment}`, py);
+    }
+    if (inFunction) {
+      for (const l of this.unpackingLines(targets, source, lits)) this.emit(l, py);
+      return;
+    }
+    // Module or class level: each name is a field initialized from the tuple.
+    const star = targets.findIndex((t) => t.startsWith('*'));
+    targets.forEach((raw, k) => {
+      const t = raw.replace(/^\*/, '');
+      if (t === UNDERSCORE_NAME || !/^\w+$/.test(t)) return;
+      const value = k === star ? `${source}.subList(${k}, ${source}.size()${targets.length - k - 1 > 0 ? ` - ${targets.length - k - 1}` : ''})` : star >= 0 && k > star ? `${source}.get(${source}.size() - ${targets.length - k})` : `${source}.get(${k})`;
+      this.emitFieldOrLocal(t, 'Object', value, py, '');
+    });
+  }
+
   /** Emit `name = value` as a field (class/module level) or a local variable (function level). */
   private emitFieldOrLocal(name: string, type: string, valueJava: string | undefined, py: number, comment: string): void {
     const scope = this.enclosingScope();
@@ -1678,6 +1912,7 @@ class RuleTranslation {
       const isConst = /^[A-Z][A-Z0-9_]*$/.test(name);
       const t = boxIfNullable(type === 'var' ? 'Object' : type, valueJava === 'null');
       if (t !== 'Object') this.scan.moduleTypes.set(name, t);
+      this.moduleFields.add(name);
       this.emit(`${isConst ? 'public static final' : 'static'} ${t} ${name}${rhs};${comment}`, py);
       this.recordSymbol(name, 'field', py);
       return;
@@ -1692,11 +1927,13 @@ class RuleTranslation {
       const isConst = /^[A-Z][A-Z0-9_]*$/.test(name);
       const visibility = name.startsWith('__') ? 'private' : name.startsWith('_') ? 'protected' : 'public';
       const modifiers = scope.isRecord ? [visibility] : [visibility, 'static', ...(isConst ? ['final'] : [])];
+      scope.fields?.add(name);
       if (scope.isInterface) modifiers.length = 0;
       this.emit(`${modifiers.join(' ')}${modifiers.length ? ' ' : ''}${t} ${name}${rhs};${comment}`, py);
       this.recordSymbol(name, 'field', py);
       return;
     }
+    if (scope.kind === 'static') return this.assignInStaticBlock(scope, name, type, valueJava, py, comment);
     // function scope
     const declared = scope.declared!;
     if (declared.has(name)) {

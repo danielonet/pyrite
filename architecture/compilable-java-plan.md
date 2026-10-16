@@ -118,6 +118,14 @@ it takes the files that parse as Java from 14 to 157 of 167 (4,934 error rows to
 writes (`TODO(pyrite)`) are now the measurable to-do list for the rows below. Still open: the rows
 that need the AST front end (0.1).
 
+1.2 (tuple unpacking) and the tuple-literal half of 3.2 are done: stubs on the standard library
+went from 4,397 to 1,984. Largest remaining causes: statements at module level (1.6), loop-else /
+try-else (199), nested `def` (158), star-unpacking (1.12), comprehensions over tuples.
+
+1.6 (statements at module level -> static blocks) and 2.26 (reassigned module fields are not
+`final`, within one file) are done: stubs 1,984 -> 1,611. Next by count: loop-else / try-else
+(212), nested `def` (166), star-unpacking (98), comprehensions (82), slices (64).
+
 Every item here produced a javac syntax error. Add a parse gate: run the Java output
 through a Java parser (tree-sitter-java or `javac -proc:none` on the single file). On
 failure, **degrade the offending statement** to a compile-safe stub

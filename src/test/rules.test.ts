@@ -1542,7 +1542,8 @@ def f(n, pair):
   contains(out, 'for (int j = 0; j < 2; j++) {');
   contains(out, 'for (int unused = 0; unused < 3; unused++) {');
   contains(out, 'System.out.println(unused);');
-  contains(out, '(a, unused) = pair;');
+  contains(out, 'var a = pair.get(0);');
+  assert.ok(!out.includes('pair.get(1)'), 'the `_` target is skipped');
   contains(out, 'default -> {');
 });
 
@@ -1599,4 +1600,134 @@ def f():
   contains(out, '} catch (NoSuchElementException ignored) {');
   contains(out, '} catch (CharacterCodingException ignored) {');
   contains(out, '} catch (NoClassDefFoundError ignored) {');
+});
+
+test('tuples: tuple literals become Tuple.of, except call arguments, format operands and `in` collections', () => {
+  const out = java(`
+VERSION = (3, 1, 0, "alpha", 2)
+EMPTY = ()
+
+def f(a, b, xs, o):
+    q = 1, 2
+    if isinstance(o, (int, str)):
+        pass
+    if a in (1, 2, 3):
+        pass
+    for x in (a, b):
+        pass
+    msg = "%s and %s" % (a, b)
+    pairs = [(x, x * 2) for x in xs]
+    g((a, b), c=(1, 2))
+    return (a, b)
+`);
+  contains(out, 'public static final Tuple VERSION = Tuple.of(3, 1, 0, "alpha", 2);');
+  contains(out, 'public static final Tuple EMPTY = Tuple.of();');
+  contains(out, 'Tuple q = Tuple.of(1, 2);');
+  contains(out, 'if ((o instanceof Integer || o instanceof String)) {');
+  contains(out, 'if (List.of(1, 2, 3).contains(a)) {');
+  contains(out, 'for (var x : List.of(a, b)) {');
+  contains(out, 'var msg = String.format("%s and %s", a, b);');
+  contains(out, '.map(x -> Tuple.of(x, x * 2))');
+  contains(out, 'g(Tuple.of(a, b), /* c = */ Tuple.of(1, 2));');
+  contains(out, 'return Tuple.of(a, b);');
+});
+
+test('tuples: unpacking becomes one statement per name; swaps and calls go through a temporary', () => {
+  const out = java(`
+def f(pair, xs, d, o):
+    a, b = pair
+    a, b = b, a
+    first, *rest = xs
+    *init, last = xs
+    v, _, w = o.split(".")
+    d["k"], c = compute()
+    (s, t) = [1, 2]
+`);
+  contains(out, 'var a = pair.get(0);\n        var b = pair.get(1);');
+  contains(out, 'var tuple = Tuple.of(b, a); // tuple unpacking\n        a = tuple.get(0);\n        b = tuple.get(1);');
+  contains(out, 'var rest = xs.subList(1, xs.size());');
+  contains(out, 'var init = xs.subList(0, xs.size() - 1);');
+  contains(out, 'var last = xs.get(xs.size() - 1);');
+  contains(out, 'var tuple2 = o.split("."); // tuple unpacking\n        var v = tuple2.get(0);\n        var w = tuple2.get(2);');
+  contains(out, 'd.put("k", tuple3.get(0));');
+  contains(out, 'var s = 1;\n        var t = 2;');
+});
+
+test('tuples: loops unpack at the top of the body, and the names are scoped to the loop', () => {
+  const out = java(`
+def f(xs):
+    for k, v in xs:
+        print(k)
+    for k, v in xs:
+        for m, n in v:
+            pass
+`);
+  contains(out, 'for (var item : xs) { // tuple unpacking\n            var k = item.get(0);\n            var v = item.get(1);');
+  contains(out, 'for (var item2 : xs) { // tuple unpacking\n            var k = item2.get(0);');
+  contains(out, 'for (var item3 : v) { // tuple unpacking\n                var m = item3.get(0);');
+});
+
+test('tuples: module and class level unpacking declares one field per name; unpacked self fields are declared', () => {
+  const out = java(`
+A, B = 1, 2
+X, Y = divmod(7, 2)
+
+class P:
+    def __init__(self, pair):
+        self.x, self.y = pair
+`);
+  contains(out, 'public static final int A = 1;');
+  contains(out, 'public static final int B = 2;');
+  contains(out, 'static Object tuple = Tuple.of(Math.floorDiv(7, 2), Math.floorMod(7, 2)); // tuple unpacking');
+  contains(out, 'public static final Object X = tuple.get(0);');
+  contains(out, 'public Object x; // assigned as self.x in __init__()');
+  contains(out, 'this.y = pair.get(1);');
+});
+
+test('static blocks: module-level statements run in a static initializer, in Python order', () => {
+  const out = java(`
+REGISTRY = {}
+COUNT = 0
+
+try:
+    import zstd
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
+
+REGISTRY["a"] = 1
+COUNT += 1
+
+def helper():
+    return COUNT
+
+Iterator.register(helper)
+LIMIT = 10
+`);
+  // a field the static block assigns again is not final
+  contains(out, '    public static int COUNT = 0;\n');
+  contains(out, '    public static final Map<String, Object> REGISTRY = new HashMap<>();');
+  // a name first assigned inside the block is declared just before it
+  contains(out, '    static boolean HAS_ZSTD;\n    static {\n        try {\n            HAS_ZSTD = true;');
+  contains(out, '        REGISTRY.put("a", 1);\n        COUNT += 1;\n    }\n\n    public static Object helper() {');
+  contains(out, '    static {\n        Iterator.register(helper);\n    }\n    public static final int LIMIT = 10;');
+});
+
+test('static blocks: class bodies get one too, enums and interfaces do not', () => {
+  const out = java(`
+from enum import Enum
+
+class Box:
+    size = 3
+    for _i in range(2):
+        size += 1
+    label = "box"
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+`);
+  contains(out, '        public static int size = 3;\n        static {\n            for (int _i = 0; _i < 2; _i++) {\n                size += 1;\n            }\n        }\n        public static String label = "box";');
+  contains(out, 'RED(1),');
+  assert.ok(!/enum Color[\s\S]*static \{/.test(out), 'no static block in the enum');
 });

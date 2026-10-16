@@ -176,6 +176,14 @@ export function collectSelfFields(lines: LogicalLine[], i: number, resolve?: Val
     }
     const masked = maskStrings(l.text);
     const code = codeOf(l);
+    // `self.x, self.y = pair`: each unpacked field exists too (its type is unknown).
+    const unpacked = /^\(?self\.\w+(?:\s*,\s*self\.\w+)+\)?\s*=(?!=)/.exec(code);
+    if (unpacked) {
+      for (const f of unpacked[0].matchAll(/self\.(\w+)/g)) {
+        if (!seen.has(f[1])) seen.set(f[1], { name: f[1], type: 'Object', py: l.startLine, where: currentDef ? `${currentDef}()` : 'class body' });
+      }
+      continue;
+    }
     const m = /^self\.(\w+)\s*(?::\s*([^=]+?))?\s*(?:=|\+=|-=)\s*(.+)$/.exec(code);
     if (m && !seen.has(m[1])) {
       const rhs = m[3].trim();

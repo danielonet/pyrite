@@ -55,10 +55,10 @@ public final class Main {
         OrderExportJob job = new OrderExportJob(repo, /* chunk_size = */ 2);
         JobResult result = job.run();
 
-        if (true) throw new UnsupportedOperationException("TODO(pyrite): rows = [(o.id, o.status.name, money(o.t...");
-                // was: List<Object> rows = repo.orders().stream()
-                // was: .map(o -> (o.id, o.status.name, money(o.total(), DEFAULT_CURRENCY)))
-                // was: .toList();
+        List<Object> rows = repo.orders()
+                .stream()
+                .map(o -> Tuple.of(o.id, o.status.name, money(o.total(), DEFAULT_CURRENCY)))
+                .toList();
         System.out.println(table(List.of("id", "status", "total"), rows));
         System.out.println("Exported " + result.written + " of " + result.read + " orders, skipped " + result.skipped);
         return result.failed == 0 ? 0 : 1;

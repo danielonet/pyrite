@@ -250,6 +250,41 @@ function rewriteChainedComparisons(text: string): string {
   return out;
 }
 
+/** Words after which `(...)` is a value, not a call's argument list (`return (a, b)`). */
+const VALUE_KEYWORDS = new Set(['return', 'in', 'not', 'and', 'or', 'if', 'else', 'elif', 'yield', 'await', 'is', 'lambda', 'assert', 'del', 'from']);
+
+/**
+ * Python tuple literals -> `Tuple.of(...)`: `(a, b)`, `(x,)`, `()`, at every bracket depth. A
+ * call's argument list is not a tuple, nor a `for (a, b) in` target, nor the operand of
+ * `"..." % (a, b)` (a format call later). After `in` a tuple is a collection to test or walk,
+ * so it becomes `List.of(...)`.
+ */
+function rewriteTuples(text: string): string {
+  if (!text.includes('(')) return text;
+  let out = '';
+  for (let i = 0; i < text.length; ) {
+    if (text[i] !== '(') {
+      out += text[i];
+      i += 1;
+      continue;
+    }
+    const end = groupEnd(text, i);
+    if (end < 0) {
+      out += text.slice(i);
+      break;
+    }
+    const inner = rewriteTuples(text.slice(i + 1, end - 1));
+    const before = out.replace(/\s+$/, '');
+    const prevWord = /(?<![.\w])(\w+)$/.exec(before)?.[1];
+    const isValueKeyword = prevWord !== undefined && VALUE_KEYWORDS.has(prevWord);
+    const isCall = /[\w)\]\u0001]$/.test(before) && !isValueKeyword;
+    const isTuple = !isCall && prevWord !== 'for' && !/%$/.test(before) && (inner.trim() === '' || indexAtDepth0(inner, /,/) >= 0);
+    out += isTuple ? `${prevWord === 'in' ? 'List' : 'Tuple'}.of(${splitTopLevel(inner).join(', ')})` : `(${inner})`;
+    i = end;
+  }
+  return out;
+}
+
 /** Applies the ternary rewrite to every comma-separated item at every bracket depth. */
 function rewriteTernary(text: string): string {
   if (!/\sif\s/.test(text)) return text;
@@ -467,6 +502,7 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   let t = masked.replace(new RegExp(`(${PLACEHOLDER_RE})\\s+(?=${PLACEHOLDER_RE})`, 'g'), '$1 + ');
   t = rewriteIntLiterals(t);
   t = rewriteChainedComparisons(t);
+  t = rewriteTuples(t);
   t = rewriteComprehensions(t);
   t = rewriteLambda(t);
   t = rewriteTernary(t);

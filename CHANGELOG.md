@@ -8,6 +8,24 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **Static initializer blocks.** Module- and class-level code that is not a
+  declaration (calls, `del`, `obj.attr = ...`, `d[k] = v`, `X += 1`,
+  `if`/`for`/`try`/`with`, reassigning a field) runs in a `static { }` block
+  instead of sitting in the class body. Consecutive statements share one
+  block and a declaration closes it, so the Python order is kept. A name
+  first assigned inside the block (`try: import x; HAS_X = True`) is declared
+  as a field just before it, and a field the code assigns again is no longer
+  `final`. Enums and interfaces are left as they were. Stubs on the Python
+  3.12 standard library: 1,984 -> 1,611.
+- **Tuples.** Tuple literals become `Tuple.of(...)` (`List.of(...)` after `in`
+  and in `for x in (a, b)`); call arguments and `"..." % (a, b)` are left
+  alone. Unpacking becomes one statement per name: `a, b = pair` ->
+  `var a = pair.get(0); var b = pair.get(1);`, with a temporary for calls
+  and swaps, `subList` for `first, *rest`, `_` skipped, and fields at module
+  and class level. `for k, v in pairs:` unpacks at the top of the loop body.
+  `self.x, self.y = ...` declares both fields. `isinstance(x, (int, str))`
+  tests `Integer`/`String`. On the Python 3.12 standard library this halves
+  the parse-gate stubs (4,397 -> 1,984).
 - **Parse gate.** Every Java view is parsed with tree-sitter-java. Each
   generated statement that is not valid Java becomes a stub that parses,
   `if (true) throw new UnsupportedOperationException("TODO(pyrite): <python>");`,
