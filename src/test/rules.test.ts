@@ -28,6 +28,11 @@ function java(source: string, relativePath = 'pkg/mod.py'): string {
   return translateWithRules({ source, relativePath }).java;
 }
 
+/** The view with Python's imports kept as Java-looking lines (`resolveImports: false`). */
+function pythonImportsView(source: string, relativePath = 'pkg/mod.py'): string {
+  return translateWithRules({ source, relativePath, pythonImports: true }).java;
+}
+
 function contains(haystack: string, needle: string): void {
   assert.ok(haystack.includes(needle), `expected output to contain:\n  ${needle}\n--- output ---\n${haystack}`);
 }
@@ -80,7 +85,7 @@ test('strings are never rewritten', () => {
 });
 
 test('module structure: package, imports, module class, main', () => {
-  const out = java(
+  const out = pythonImportsView(
     `"""Doc."""
 import os
 from ..models import Order, Customer as C
@@ -614,7 +619,7 @@ class Bag:
   // The positional-only marker is just a separator: the constructor is still pure boilerplate.
   contains(out, '@AllArgsConstructor\n    public static class Point {');
   // Varargs/kwargs constructors have no @AllArgsConstructor shape and stay spelled out.
-  contains(out, 'public Bag(Object... items, Map<String, Object> options /* **kwargs */) {');
+  contains(out, 'public Bag(Object[] items, Map<String, Object> options /* **kwargs */) {');
   assert.ok(!/@AllArgsConstructor\n    public static class Bag/.test(out));
 });
 
@@ -728,7 +733,7 @@ test('test modules go to src/test/java, the rest to src/main/java', () => {
 test('the package line and the imports of project modules start with the base package', () => {
   const source = 'import os\nfrom typing import List\nfrom .models import Order\nfrom ..util import fmt\nfrom app.repo import Repo\nimport app.db as db\n';
   const knownMembers = { properties: {}, attributes: [], returnTypes: {}, fieldTypes: {}, modules: { 'app.repo': 'shop.app.Repo', 'app.db': 'shop.app.Db' } };
-  const out = translateWithRules({ source, relativePath: 'app/services/x.py', basePackage: 'shop', knownMembers }).java;
+  const out = translateWithRules({ source, relativePath: 'app/services/x.py', basePackage: 'shop', knownMembers, pythonImports: true }).java;
   contains(out, 'package shop.app.services;');
   contains(out, 'import shop.app.services.models.Order;');
   contains(out, 'import shop.app.util.fmt;');
@@ -738,7 +743,7 @@ test('the package line and the imports of project modules start with the base pa
   contains(out, 'import os;');
   contains(out, 'import typing.List;');
   // Without a base package nothing changes.
-  contains(translateWithRules({ source, relativePath: 'app/services/x.py', knownMembers }).java, 'import app.services.models.Order;');
+  contains(translateWithRules({ source, relativePath: 'app/services/x.py', knownMembers, pythonImports: true }).java, 'import app.services.models.Order;');
 });
 
 test('mirrorProject writes a standard Java project layout under the project name', async () => {
@@ -871,7 +876,7 @@ def f(note, buffer):
 });
 
 test('builtins: file APIs pull in java.io', () => {
-  const out = java(`
+  const out = pythonImportsView(`
 def read(p):
     with open(p) as fh:
         return fh.read()
@@ -1521,7 +1526,7 @@ class Color(enum.Enum):
   contains(out, 'return abstract_;');
   // keyword arguments the translator reads, and imported module names, are left alone
   contains(out, 'public int count = 3;');
-  contains(out, 'import enum;');
+  contains(out, '// python: import enum');
   contains(out, 'RED(enum.auto()),');
 });
 
@@ -1863,4 +1868,285 @@ def deco(f):
     return call
 `);
   contains(out, 'return wrapper.apply(args.toArray());');
+});
+
+test('subscripts: a subscripted key stays whole; UPPER_CASE[...] is an index, not a generic type', () => {
+  const out = java(`
+def f(d, lnum, fmt, i):
+    d[PROTO[0]] = load
+    d[lnum[0]] += 1
+    del d[fmt[i]]
+    e = {"E": "E", "e": "e"}[fmt]
+    x: List[int] = []
+    c: Callable[[int], str] = g
+`);
+  contains(out, 'd.put(PROTO.get(0), load);');
+  contains(out, 'd.put(lnum.get(0), d.get(lnum.get(0)) + 1);');
+  contains(out, 'd.remove(fmt.get(i));');
+  contains(out, 'var e = Map.of("E", "E", "e", "e").get(fmt);');
+  contains(out, 'List<Integer> x');
+});
+
+test('calls on values: called through a functional interface; type(self)(...) constructs', () => {
+  const out = java(`
+class Point:
+    def f(self, event, frame, args):
+        self.dispatch[event](self, frame)
+        self.dispatch["call"](self, frame, 0)
+        enc = factory(event)(frame)
+        y = lookup("stat")()
+        z = _caches[event](*args)
+        return type(self)(event, frame)
+    def g(self):
+        return self.__class__(1, 2)
+`);
+  contains(out, '((BiFunction<Object, Object, Object>) this.dispatch.get(event)).apply(this, frame);');
+  contains(out, '((Function<Object[], Object>) this.dispatch.get("call")).apply(new Object[] {this, frame, 0});');
+  contains(out, 'var enc = ((Function<Object, Object>) factory(event)).apply(frame);');
+  contains(out, 'var y = ((Supplier<Object>) lookup("stat")).get();');
+  contains(out, 'var z = ((Function<Object[], Object>) _caches.get(event)).apply(args.toArray());');
+  contains(out, 'return new Point(event, frame);');
+  contains(out, 'return new Point(1, 2);');
+});
+
+test('operators: %, ** and in take whole operands, nested calls and subscripts included', () => {
+  const out = java(`
+def f(data, k, lines, start, dump, s, kind):
+    a = '<td>%s</td>' % small(grey(', '.join(dump)))
+    b = '{%s}' % data[1:-1]
+    c = 4 ** _ceil(_log(k * 3, 4))
+    d = s.CONTEXT % (data, k)
+    if not s.lower() in ['deb', 'unix']:
+        pass
+    while start < len(lines) and lines[start].strip() in ('', '#'):
+        pass
+    return k % 2
+`);
+  contains(out, 'var a = String.format("<td>%s</td>", small(grey(String.join(", ", dump))));');
+  contains(out, 'var b = String.format("{%s}", data.subList(1, data.size() - 1));');
+  contains(out, 'var c = Math.pow(4, _ceil(_log(k * 3, 4)));');
+  contains(out, 'var d = String.format(s.CONTEXT, data, k);');
+  contains(out, 'if (!List.of("deb", "unix").contains(s.toLowerCase())) {');
+  contains(out, 'List.of("", "#").contains(lines.get(start).trim())');
+  contains(out, 'return k % 2;');
+});
+
+test('builtin types: int(s, base) parses; types used as values are classes', () => {
+  const out = java(`
+def f(s, d, T, v):
+    a = int(s, 16)
+    b = int(s, 0)
+    d[int] = g
+    if issubclass(T, int) and type(v.x) in (int, float):
+        pass
+    obj = super(Fraction, cls).__new__(cls)
+`);
+  contains(out, 'var a = Integer.parseInt(s, 16);');
+  contains(out, 'var b = Integer.decode(s);');
+  contains(out, 'd.put(Integer.class, g);');
+  contains(out, 'if (Integer.class.isAssignableFrom(T) && List.of(Integer.class, Double.class).contains(v.x.getClass())) {');
+  contains(out, 'super.__new__(');
+});
+
+test('tuples: nested targets unpack through a named inner tuple', () => {
+  const out = java(`
+def f(x, pairs):
+    name, (a, b) = x
+    for k, (c, d) in pairs:
+        print(c)
+`);
+  contains(out, 'var name = x.get(0);\n        var inner = x.get(1);\n        var a = inner.get(0);\n        var b = inner.get(1);');
+  contains(out, 'for (var item : pairs) { // tuple unpacking\n            var k = item.get(0);\n            var inner2 = item.get(1);\n            var c = inner2.get(0);');
+});
+
+test('slices: plain names use subList; calls, subscripts and steps go through Py.slice', () => {
+  const out = java(`
+def f(xs, s, lines, idx, n):
+    a = xs[1:]
+    b = xs[-n:]
+    c = xs[:]
+    d = s.readline()[:-1]
+    e = lines[idx][len('-x'):]
+    g = xs[::2]
+    h = s.get_breaks()[-1]
+    i = lines[0][-2]
+`);
+  contains(out, 'var a = xs.subList(1, xs.size());');
+  contains(out, 'var b = xs.subList(xs.size() - n, xs.size());');
+  contains(out, 'var c = new ArrayList<>(xs);');
+  contains(out, 'var d = Py.slice(s.readline(), null, -1);');
+  contains(out, 'var e = Py.slice(lines.get(idx), "-x".length(), null);');
+  contains(out, 'var g = Py.slice(xs, null, null, 2);');
+  contains(out, 'var h = s.get_breaks().getLast();');
+  contains(out, 'var i = Py.at(lines.get(0), -2);');
+});
+
+test('slices: assignment replaces the range, del clears it', () => {
+  const out = java(`
+def f(xs, n, data, pos, i):
+    del xs[n:]
+    del xs[-2:]
+    xs[pos:pos + n] = data
+    xs[:] = data
+    xs[:] = xs[n:]
+    xs[-6:] = data
+    xs[:1] = []
+    xs[-3:-1] = data
+`);
+  contains(out, 'xs.subList(n, xs.size()).clear();');
+  contains(out, 'xs.subList(xs.size() - 2, xs.size()).clear();');
+  contains(out, 'xs.subList(pos, pos + n).clear(); xs.addAll(pos, data);');
+  contains(out, 'xs.clear(); xs.addAll(data);');
+  contains(out, 'var items = new ArrayList<>(xs.subList(n, xs.size())); xs.clear(); xs.addAll(items);');
+  contains(out, 'xs.subList(xs.size() - 6, xs.size()).clear(); xs.addAll(data);');
+  contains(out, 'xs.subList(0, 1).clear();\n');
+  contains(out, 'int at = xs.size() - 3; xs.subList(xs.size() - 3, xs.size() - 1).clear(); xs.addAll(at, data);');
+});
+
+test('logical lines: a backslash continuation after a "#" inside a string still joins', () => {
+  const out = java(`
+def f(lines, end):
+    if lines[end] == '#' and \\
+            g(end):
+        pass
+`);
+  contains(out, 'if (lines.get(end) == "#" && g(end)) {');
+});
+
+test('comprehensions: tuple targets, nesting, several clauses and dict(pairs)', () => {
+  const out = java(`
+def f(d, theweek, paths, traps, xs, ys, fields, result, name):
+    s = " ".join(fmt(a, b) for (a, b) in theweek)
+    items = [(v, k) for (k, v) in d.items()]
+    sp = [[c for c in p if c] for p in paths]
+    t = dict((x, x in traps) for x in xs)
+    prod = [x * y for x in xs for y in ys if y]
+    fo = {n: i for (i, n) in enumerate(fields)}
+    last = [e for (k, o, e) in result]
+    if any((0 <= ord(ch) <= 9) for ch in name):
+        pass
+`);
+  contains(out, 'var s = String.join(" ", theweek.stream().map(item -> fmt(item.get(0), item.get(1))));');
+  contains(out, 'd.entrySet().stream().map(item -> Tuple.of(item.getValue(), item.getKey())).toList();');
+  contains(out, 'paths.stream().map(p -> p.stream().filter(c -> c).toList()).toList();');
+  contains(out, 'xs.stream().collect(Collectors.toMap(x -> x, x -> traps.contains(x)));');
+  contains(out, 'xs.stream().flatMap(x -> ys.stream().filter(y -> y).map(y -> x * y)).toList();');
+  contains(out, '.map(item -> Map.entry(item.get(1), item.get(0)))');
+  contains(out, '.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));');
+  contains(out, 'result.stream().map(item -> item.get(2)).toList();');
+  contains(out, 'name.stream().anyMatch(ch -> (0 <= (int) ch && (int) ch <= 9))');
+});
+
+test('loops: a bare tuple is walked as a list; nested targets unpack under enumerate and items()', () => {
+  const out = java(`
+def f(d, ops):
+    for j in 1, 2, 5:
+        print(j)
+    for i, (op, arg) in enumerate(ops):
+        print(op)
+    for (a, b), (c, e) in d.items():
+        print(c)
+`);
+  contains(out, 'for (var j : List.of(1, 2, 5)) {');
+  contains(out, 'var op = ops.get(i).get(0);\n            var arg = ops.get(i).get(1);');
+  contains(out, 'var a = entry.getKey().get(0);');
+  contains(out, 'var e = entry.getValue().get(1);');
+});
+
+test('generators: yields collect into a list that the function returns', () => {
+  const out = java(`
+from typing import Iterator
+
+def evens(xs):
+    for x in xs:
+        if x % 2 == 0:
+            yield x
+
+def pairs(d) -> Iterator[int]:
+    if not d:
+        return
+    for k, v in d.items():
+        yield k, v
+    yield from (x for x in d)
+
+def outer():
+    def inner():
+        yield 1
+    return inner
+
+def endless():
+    n = 0
+    while True:
+        yield n
+        n += 1
+
+def plain(yielded, name):
+    yielded[name] = 1
+`);
+  contains(out, 'public static List<Object> evens(Object xs) {\n        List<Object> yielded = new ArrayList<>(); // generator, collected eagerly');
+  contains(out, '                yielded.add(x);\n            }\n        }\n        return yielded;\n    }');
+  contains(out, 'public static Iterator<Integer> pairs(Object d) {');
+  contains(out, '            return yielded.iterator();\n        }');
+  contains(out, 'yielded.add(Tuple.of(k, v));');
+  contains(out, 'yielded.addAll((d.stream()).toList());\n        return yielded.iterator();');
+  contains(out, 'Supplier<List<Object>> inner = () -> { // nested function\n            List<Object> yielded = new ArrayList<>();');
+  contains(out, '            n += 1;\n        }\n    }');
+  contains(out, 'public static void plain(Object yielded, Object name) {\n        yielded.put(name, 1);');
+});
+
+test('type hints: Generator keeps the yielded type; Callable with three parameters takes an array', () => {
+  const out = java(`
+from typing import Generator, Callable
+
+def g() -> Generator[int, None, None]:
+    yield 1
+
+def h(f: Callable[[int, str, bool], int]):
+    pass
+`);
+  contains(out, 'public static Iterator<Integer> g() {\n        List<Integer> yielded = new ArrayList<>();');
+  contains(out, 'h(Function<Object[], Integer> f)');
+});
+
+test('strings: Python escapes become Java ones; unknown escapes keep their backslash', () => {
+  assert.equal(translateExpression(String.raw`'\x00\x0a'`), String.raw`"\000\012"`);
+  assert.equal(translateExpression(String.raw`'\a\v'`), String.raw`"\007\013"`);
+  assert.equal(translateExpression(String.raw`'\d+\s'`), String.raw`"\\d+\\s"`);
+  assert.equal(translateExpression(String.raw`r'\d+'`), String.raw`"\\d+"`);
+  assert.equal(translateExpression(String.raw`'\U0001F600'`), '"\\ud83d\\ude00"');
+  assert.equal(translateExpression(String.raw`'tab\t\"q\" \\ end\n'`), String.raw`"tab\t\"q\" \\ end\n"`);
+});
+
+test('javac: attributes named int/float, varargs before **kwargs, decorator arguments, class literals', () => {
+  const out = java(`
+import functools
+class W:
+    def __init__(self, a):
+        self.int = a
+    def f(self, *args, **kw):
+        return self.int
+    def g(self, *args, key=None):
+        return issubclass(key, type)
+    @functools.lru_cache(maxsize=128, typed=True)
+    def h(self):
+        pass
+    @functools.wraps(f)
+    def k(self):
+        pass
+`);
+  contains(out, 'this.int_ = a;');
+  contains(out, 'public Object f(Object[] args, Map<String, Object> kw /* **kwargs */) {');
+  contains(out, 'public Object g(Object[] args, Object /* nullable */ key /* = null */) {');
+  contains(out, 'return Class.class.isAssignableFrom(key);');
+  contains(out, '@Lru_cache(maxsize = 128, typed = true)');
+  contains(out, '// @functools.wraps(f)');
+});
+
+test('imports: real Java imports by default; Python modules stay as comments', () => {
+  const source = 'import os\nfrom typing import List\nfrom app.repo import Repo\n\ndef f(p):\n    with open(p) as fh:\n        return Repo(fh)\n';
+  const knownMembers = { properties: {}, attributes: [], returnTypes: {}, fieldTypes: {}, modules: { 'app.repo': 'shop.app.Repo' } };
+  const out = translateWithRules({ source, relativePath: 'app/services/x.py', basePackage: 'shop', knownMembers }).java;
+  contains(out, 'import java.io.BufferedReader;\nimport java.io.FileReader;\n\nimport shop.app.Repo;\n\n// python: import os\n// python: from typing import List\n');
+  assert.ok(!/^import (os|typing)/m.test(out), 'no Python module is imported as if it were Java');
+  assert.ok(!/import java\.util\.\*;/.test(out), 'wildcards are replaced by the classes used');
 });

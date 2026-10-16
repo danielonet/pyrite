@@ -19,12 +19,12 @@
 import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { boxed, splitTopLevel, translateType } from './typeHints';
-import { ExprContext, LocalFunction, indexAtDepth0, mapExceptionName, setFStringExpressionContext, translateExpression, translateMaskedExpression } from './expressions';
+import { ExprContext, LocalFunction, indexAtDepth0, mapExceptionName, sliceBound, setFStringExpressionContext, translateExpression, translateMaskedExpression } from './expressions';
 import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, isInitModule, moduleClassName, packageFromPath, pythonPackageParts, toPascalCase } from '../types';
 import { FieldInfo, KnownMembers, MemberScan, classNameOf, collectSelfFields, elementTypeOf, inferTypeFromMaskedValue, mapTypesOf, scanMembers, toKnownMembers, typeFromDefault } from './members';
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
 import { DEFAULT_LINE_WIDTH, formatJavaLine } from './layout';
-import { codeOnly } from '../imports/javaImports';
+import { applyImports, codeOnly, planImports, renderImports } from '../imports/javaImports';
 import { NullabilityScan, boxIfNullable, nullableType, scanNullability } from './nullability';
 import { UNDERSCORE_NAME, renameJavaReservedIdentifiers } from './javaNames';
 
@@ -64,6 +64,10 @@ interface Block {
   blockLocals?: string[];
   /** Name bound by `except ... as name` for this catch block. */
   catchVar?: string;
+  /** Generator function: the list its `yield`s add to (collected eagerly), returned at the end. */
+  yielded?: string;
+  /** The generator is declared to return an `Iterator`: it returns `yielded.iterator()`. */
+  yieldIterator?: boolean;
   /** pyrite.lombokStyle plan for this class, if any boilerplate here can be collapsed. */
   lombokPlan?: LombokPlan;
 }
@@ -171,15 +175,45 @@ function groupEndIndex(text: string): number {
  * The targets of an unpacking assignment or loop (`a, b`, `(a, b)`, `[a, *rest]`, `x.y, d[k]`),
  * or undefined when `target` is a single target or has nested tuples.
  */
+/**
+ * `recv[key]` split at the bracket that matches the final `]`, so a key that is itself a
+ * subscript stays whole: `dispatch[PROTO[0]]` -> [`dispatch`, `PROTO[0]`]. Undefined when the
+ * target does not end in a subscript.
+ */
+function subscriptTarget(target: string): [string, string] | undefined {
+  const t = target.trim();
+  if (!t.endsWith(']')) return undefined;
+  let depth = 0;
+  for (let i = t.length - 1; i > 0; i -= 1) {
+    if (t[i] === ')' || t[i] === ']' || t[i] === '}') depth += 1;
+    else if (t[i] === '(' || t[i] === '[' || t[i] === '{') {
+      depth -= 1;
+      if (depth === 0) return t[i] === '[' && t.slice(0, i).trim() !== '' ? [t.slice(0, i), t.slice(i + 1, -1)] : undefined;
+    }
+  }
+  return undefined;
+}
+
 function unpackTargets(target: string): string[] | undefined {
   let t = target.trim();
   if (/^[(\[]/.test(t) && groupEndIndex(t) === t.length) t = t.slice(1, -1);
   const parts = splitTopLevel(t);
   const trailingComma = /,\s*$/.test(t);
   if (parts.length < 2 && !trailingComma) return undefined;
-  if (!parts.every((p) => /^\*?[\w.]+$/.test(p) || /^[\w.]+\[.+\]$/.test(p))) return undefined;
+  if (!parts.every((p) => /^\*?[\w.]+$/.test(p) || /^[\w.]+\[.+\]$/.test(p) || nestedTargets(p))) return undefined;
   if (parts.filter((p) => p.startsWith('*')).length > 1) return undefined;
   return parts;
+}
+
+/** The targets inside a nested group such as `(f, t)` in `name, (f, t) = x`, else undefined. */
+function nestedTargets(target: string): string[] | undefined {
+  const t = target.trim();
+  return /^[(\[]/.test(t) && groupEndIndex(t) === t.length ? unpackTargets(t) : undefined;
+}
+
+/** Every name bound by unpacking `targets`, nested groups included, without the `*`. */
+function boundNames(targets: string[]): string[] {
+  return targets.flatMap((t) => nestedTargets(t) ? boundNames(nestedTargets(t)!) : [t.replace(/^\*/, '')]);
 }
 
 function stripOuterParens(text: string): string {
@@ -471,6 +505,7 @@ class RuleTranslation {
         this.lastClosed = block;
         return; // the continuation header emits "} else {" itself
       }
+      this.endGenerator(block);
       this.emit(block.closer ?? '}', 0, this.depth);
     }
   }
@@ -478,8 +513,26 @@ class RuleTranslation {
   private closeAll(): void {
     while (this.stack.length > 0) {
       const block = this.stack.pop()!;
+      this.endGenerator(block);
       this.emit(block.closer ?? '}', 0, this.depth);
     }
+  }
+
+  /** A generator body ends by returning what it collected, unless its last statement already left. */
+  private endGenerator(block: Block): void {
+    if (!block.yielded) return;
+    const last = [...this.out].reverse().find((o) => o.text.trim() !== '' && !/^\s*\/\//.test(o.text));
+    if (last && /^\s*(return|throw)\b/.test(last.text)) return;
+    // After a `while (true)` that never breaks, the end is unreachable: javac rejects a return there.
+    if (last && /^\s*}\s*$/.test(last.text)) {
+      const indent = /^\s*/.exec(last.text)![0];
+      const at = this.out.lastIndexOf(last);
+      let k = at - 1;
+      while (k >= 0 && !(this.out[k].text.startsWith(indent) && /^\S/.test(this.out[k].text.slice(indent.length)))) k -= 1;
+      const loop = this.out.slice(k, at);
+      if (k >= 0 && /^\s*while \(true\) \{/.test(this.out[k].text) && !loop.some((o) => /^\s*break;/.test(o.text))) return;
+    }
+    this.emit(this.generatorReturn(block), 0, this.depth + 1);
   }
 
   /** Nested functions visible here (from every enclosing function scope), or undefined. */
@@ -558,9 +611,17 @@ class RuleTranslation {
     const m = /^@([\w.]+)(\(.*\))?$/.exec(text.trim());
     if (!m) return `// ${text}`;
     const name = m[1].split('.').pop()!;
-    const args = m[2] ? this.expr(m[2].slice(1, -1)) : '';
     const pascal = name.charAt(0).toUpperCase() + name.slice(1);
-    return args ? `@${pascal}(${args.replace(/(\w+)\s*=\s*/g, '$1 = ')})` : `@${pascal}`;
+    if (!m[2] || m[2].slice(1, -1).trim() === '') return `@${pascal}`;
+    // Annotation arguments are `name = constant` pairs (or one constant); anything else in a
+    // decorator call (`@lru_cache(maxsize=None, typed=True)` is fine, `@wraps(func)` is not)
+    // stays a comment rather than an annotation javac rejects.
+    const args = splitTopLevel(m[2].slice(1, -1)).map((a) => a.trim()).filter(Boolean);
+    const constant = (v: string) => /^(-?\d[\w.]*|"(?:[^"\\]|\\.)*"|true|false)$/.test(v);
+    const pairs = args.map((a) => /^(\w+)\s*=(?!=)\s*(.+)$/.exec(a));
+    if (pairs.every((p) => p && constant(this.expr(p[2])))) return `@${pascal}(${pairs.map((p) => `${p![1]} = ${this.expr(p![2])}`).join(', ')})`;
+    if (args.length === 1 && !pairs[0] && constant(this.expr(args[0]))) return `@${pascal}(${this.expr(args[0])})`;
+    return `// ${text.trim()}`;
   }
 
   /** Lines of the body of the block whose header is at index i. */
@@ -841,27 +902,18 @@ class RuleTranslation {
     return undefined;
   }
 
-  private translateStatement(i: number, line: LogicalLine, code: string, lits: string[], un: (s: string) => string, py: number, comment: string): void {
-    const masked = { literals: lits };
-    void masked;
-
-    // decorators
-    if (code.startsWith('@')) {
-      this.pendingDecorators.push({ text: un(code), py });
-      return;
-    }
-
-    // imports
+  /** An `import` / `from ... import` statement: recorded for the import block (wherever it appears). */
+  private translateImport(code: string, py: number): boolean {
     let m: RegExpExecArray | null;
     if ((m = /^import\s+(.+)$/.exec(code))) {
       for (const part of splitTopLevel(m[1])) {
         const [mod, alias] = part.split(/\s+as\s+/).map((s) => s.trim());
         this.imports.push({ text: `import ${this.qualifyProjectModule(mod, false)};${alias ? ` // as ${alias}` : ''}`, py });
       }
-      return;
+      return true;
     }
     if ((m = /^from\s+(\S+)\s+import\s+(.+)$/.exec(code))) {
-      if (m[1] === '__future__') return;
+      if (m[1] === '__future__') return true;
       const mod = this.qualifyProjectModule(this.resolveModule(m[1]), m[1].startsWith('.'));
       const names = m[2].replace(/^\(|\)$/g, '');
       if (names.trim() === '*') {
@@ -874,8 +926,24 @@ class RuleTranslation {
           this.imports.push({ text: `import ${dotted};${alias ? ` // as ${alias}` : ''}`, py });
         }
       }
+      return true;
+    }
+    return false;
+  }
+
+  private translateStatement(i: number, line: LogicalLine, code: string, lits: string[], un: (s: string) => string, py: number, comment: string): void {
+    const masked = { literals: lits };
+    void masked;
+
+    // decorators
+    if (code.startsWith('@')) {
+      this.pendingDecorators.push({ text: un(code), py });
       return;
     }
+
+    // imports
+    if (this.translateImport(code, py)) return;
+    let m: RegExpExecArray | null;
 
     // compound statements
     if ((m = /^class\s+(\w+)\s*(\[[^\]]*\])?\s*(?:\((.*)\))?\s*:$/.exec(code))) {
@@ -1339,9 +1407,14 @@ class RuleTranslation {
       paramNames.push(pname);
     });
 
+    // Java varargs must come last: before `**kwargs` or keyword-only parameters, `*args` is an array.
+    const varargs = params.findIndex((p) => /\.\.\. \w+$/.test(p));
+    if (varargs >= 0 && varargs < params.length - 1) params[varargs] = params[varargs].replace(/\.\.\. (\w+)$/, '[] $1');
+
     // name, return type, modifiers
     let javaName = name;
     let ret = returnHint ? translateType(returnHint) : this.inferReturnType(i);
+    const generator = this.bodyYields(i);
     let modifiers: string[] = [];
     let isCtor = false;
 
@@ -1375,6 +1448,7 @@ class RuleTranslation {
       // A function inside a function: Java has no nested methods, so it becomes a lambda.
       for (const d of decorators) this.emit(`// ${d.text}`, d.py);
       this.translateNestedDef(line, name, rawParams, ret, declared, types, nullability, enclosing, comment);
+      if (generator) this.startGenerator(i, ret, py);
       return;
     }
     for (const d of otherDecorators) this.emit(this.decoratorToAnnotation(d.text), d.py);
@@ -1399,6 +1473,7 @@ class RuleTranslation {
       this.out[this.out.length - 1].text = this.out[this.out.length - 1].text.replace(/;(\s*\/\/.*)?$/, ' {$1');
     }
     this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability });
+    if (generator && !isCtor) this.startGenerator(i, ret, py);
   }
 
   /**
@@ -1472,33 +1547,80 @@ class RuleTranslation {
   }
 
   private inferReturnType(i: number): string {
+    if (this.bodyYields(i)) return 'List<Object>';
     if (this.inlineBody !== undefined) {
       const inline = this.splitComment(maskStrings(this.inlineBody).text).code;
-      if (/\byield\b/.test(inline)) return 'Iterator<Object> /* generator */';
       return /^return\s+\S/.test(inline) ? 'Object' : 'void';
     }
-    const body = this.bodyLines(i);
-    const headerIndent = this.lines[i].indent;
-    let sawValue = false;
-    let sawYield = false;
-    for (const l of body) {
-      // Do not look into nested defs/classes.
-      if (/^(async\s+)?(def|class)\s/.test(l.text) && l.indent > headerIndent) {
-        // skip nested block lines
+    return this.ownBodyCode(i).some((code) => /^return\s+\S/.test(code)) ? 'Object' : 'void';
+  }
+
+  /** Masked code of the statements of the function at line `i`, without those of nested defs and classes. */
+  private ownBodyCode(i: number): string[] {
+    if (this.inlineBody !== undefined) return [this.splitComment(maskStrings(this.inlineBody).text).code];
+    const codes: string[] = [];
+    let nested = -1;
+    for (const l of this.bodyLines(i)) {
+      if (nested >= 0 && l.indent > nested) continue;
+      nested = -1;
+      if (/^(async\s+)?(def|class)\s/.test(l.text)) {
+        nested = l.indent;
         continue;
       }
-      const code = this.splitComment(maskStrings(l.text).text).code;
-      if (/^return\s+\S/.test(code)) sawValue = true;
-      if (/\byield\b/.test(code)) sawYield = true;
+      codes.push(this.splitComment(maskStrings(l.text).text).code);
     }
-    if (sawYield) return 'Iterator<Object> /* generator */';
-    return sawValue ? 'Object' : 'void';
+    return codes;
+  }
+
+  /** Whether the function at line `i` is a generator (`yield` in its own body). */
+  private bodyYields(i: number): boolean {
+    return this.ownBodyCode(i).some((code) => /(?:^|[^\w.])yield\b/.test(code));
+  }
+
+  /**
+   * Open a generator body: Java has no `yield` that suspends a method, so the generator
+   * collects what it yields into a list and returns it (plan 1.16, eager by default):
+   *
+   *   def evens(xs):              List<Object> evens(Object xs) {
+   *       for x in xs:                List<Object> yielded = new ArrayList<>(); // generator...
+   *           if x % 2 == 0:          for (var x : xs) {
+   *               yield x                 if (x % 2 == 0) { yielded.add(x); }
+   *                                   }
+   *                                   return yielded;
+   */
+  private startGenerator(i: number, ret: string, py: number): void {
+    const block = this.top()!;
+    const elem = /^(?:Iterator|Iterable|List|Collection)<(.+)>/.exec(ret)?.[1] ?? 'Object';
+    const text = this.bodyLines(i).map((l) => l.text).join('\n') + (this.inlineBody ?? '');
+    let name = 'yielded';
+    for (let n = 2; new RegExp(`\\b${name}\\b`).test(text); n += 1) name = `yielded${n}`;
+    block.yielded = name;
+    block.yieldIterator = /^Iterator\b/.test(ret);
+    block.declared?.add(name);
+    // `while True:` with no way out but an exception: collecting it eagerly never ends.
+    const own = this.ownBodyCode(i);
+    const endless = own.some((code) => /^while\s+(True|1)\s*:/.test(code)) && !own.some((code) => /^(return|break)\b/.test(code));
+    if (endless) this.warn('a generator that may never end is collected eagerly; it needs a lazy Iterator', py);
+    this.emit(`List<${elem}> ${name} = new ArrayList<>(); // generator, collected eagerly${endless ? ' (may never end: needs a lazy Iterator)' : ''}`, py);
+  }
+
+  /** The generator function whose body is being translated, if the nearest function is one. */
+  private generatorBlock(): Block | undefined {
+    const fn = [...this.stack].reverse().find((b) => b.kind === 'def');
+    return fn?.yielded ? fn : undefined;
+  }
+
+  /** `return yielded;` (or its iterator) for the generator `block`. */
+  private generatorReturn(block: Block): string {
+    return `return ${block.yielded}${block.yieldIterator ? '.iterator()' : ''};`;
   }
 
   // -------------------------------------------------------------------- for
 
   private translateFor(line: LogicalLine, target: string, maskedIterable: string, lits: string[], isAsync: boolean, comment: string): void {
     const py = line.startLine;
+    // `for x in a, b, c:` walks a tuple.
+    if (splitTopLevel(maskedIterable).length > 1) maskedIterable = `(${maskedIterable.trim()})`;
     const iterable = unmaskStrings(maskedIterable, lits);
     const asyncNote = isAsync ? ' /* async for */' : '';
     const targets = splitTopLevel(stripOuterParens(target)).map((t) => t.trim());
@@ -1546,7 +1668,7 @@ class RuleTranslation {
         const itemType = elementTypeOf(this.typeOf(args[0].trim(), lits));
         this.emit(`for (int ${idx} = ${start}; ${idx} < ${coll}.size()${start !== '0' ? ` + ${start}` : ''}; ${idx}++) {${asyncNote}${comment}`, py);
         this.stack.push({ indent: line.indent, kind: 'for' });
-        this.emit(`${typed(item, itemType)} = ${coll}.get(${idx}${start !== '0' ? ` - ${start}` : ''});`, py);
+        this.bindLoopTarget(item, `${coll}.get(${idx}${start !== '0' ? ` - ${start}` : ''})`, typed, itemType, lits, py);
         return;
       }
     }
@@ -1555,8 +1677,8 @@ class RuleTranslation {
       const [k, v] = targets;
       this.emit(`for (var entry : ${mapExpr}.entrySet()) {${asyncNote}${comment}`, py);
       this.stack.push({ indent: line.indent, kind: 'for' });
-      this.emit(`${typed(k, mapTypes?.[0])} = entry.getKey();`, py);
-      this.emit(`${typed(v, mapTypes?.[1])} = entry.getValue();`, py);
+      this.bindLoopTarget(k, 'entry.getKey()', typed, mapTypes?.[0], lits, py);
+      this.bindLoopTarget(v, 'entry.getValue()', typed, mapTypes?.[1], lits, py);
       return;
     }
     if ((m = /^zip\((.*)\)$/.exec(iterable.trim())) && targets.length >= 2) {
@@ -1583,12 +1705,19 @@ class RuleTranslation {
       return;
     }
     // `for a, b in pairs:` walks the tuples and unpacks each one at the top of the body.
-    for (const t of unpack) if (!declaredBefore.has(t.replace(/^\*/, ''))) declared?.delete(t.replace(/^\*/, ''));
+    for (const t of boundNames(unpack)) if (!declaredBefore.has(t)) declared?.delete(t);
     const item = this.freeLocalName('item');
     this.emit(`for (var ${item} : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
-    const blockLocals = unpack.map((t) => t.replace(/^\*/, '')).filter((t) => /^\w+$/.test(t) && !declaredBefore.has(t));
+    const blockLocals = boundNames(unpack).filter((t) => /^\w+$/.test(t) && !declaredBefore.has(t));
     this.stack.push({ indent: line.indent, kind: 'for', blockLocals });
     for (const l of this.unpackingLines(unpack, item, lits)) this.emit(l, py);
+  }
+
+  /** `name = value;` at the top of a loop body; a nested target (`(a, b)`) is unpacked from it. */
+  private bindLoopTarget(name: string, value: string, typed: (n: string, t: string | undefined) => string, type: string | undefined, lits: string[], py: number): void {
+    const nested = /^[(\[]/.test(name) ? unpackTargets(name) : undefined;
+    if (nested) for (const l of this.unpackingLines(nested, value, lits)) this.emit(l, py);
+    else this.emit(`${typed(name, type)} = ${value};`, py);
   }
 
   /**
@@ -1652,6 +1781,8 @@ class RuleTranslation {
     const exValue = (s: string) => un(translateMaskedExpression(s, this.exprCtx(lits, true)));
     let m: RegExpExecArray | null;
 
+    // `if not re: import re`: the import joins the import block; a comment keeps its place.
+    if (this.translateImport(code, py)) return this.emit(`// ${un(code)} (see the imports)${comment}`, py);
     if (code === 'pass') return this.emit(`// pass${comment}`, py);
     if (code === '...') return this.emit(`// ...${comment}`, py);
     if (code === 'break') {
@@ -1660,7 +1791,12 @@ class RuleTranslation {
       return this.emit(`break;${comment}`, py);
     }
     if (code === 'continue') return this.emit(`continue;${comment}`, py);
-    if (code === 'return') return this.emit(`return;${comment}`, py);
+    const generator = this.generatorBlock();
+    if (code === 'return') return this.emit(`${generator ? this.generatorReturn(generator) : 'return;'}${comment}`, py);
+    if (generator && (m = /^return\s+(.+)$/.exec(code))) {
+      // A generator's return value only reaches `yield from` callers (StopIteration.value).
+      return this.emit(`${this.generatorReturn(generator)} // return value: ${un(m[1]).replace(/\*\//g, '*&#47;')}${comment}`, py);
+    }
     if ((m = /^return\s+(.+)$/.exec(code))) {
       const parts = splitTopLevel(m[1]);
       const value = parts.length > 1 ? `Tuple.of(${parts.map(exValue).join(', ')})` : exValue(m[1]);
@@ -1684,13 +1820,25 @@ class RuleTranslation {
     }
     if ((m = /^del\s+(.+)$/.exec(code))) {
       const target = m[1].trim();
-      const sub = /^(.+)\[(.+)\]$/.exec(target);
-      if (sub) return this.emit(`${ex(sub[1])}.remove(${ex(sub[2])});${comment}`, py);
+      const sub = subscriptTarget(target);
+      const slice = sub && this.sliceStatement(sub[0], sub[1], undefined, ex);
+      if (slice) return this.emit(`${slice}${comment}`, py);
+      if (sub) return this.emit(`${ex(sub[0])}.remove(${ex(sub[1])});${comment}`, py);
       return this.emit(`${ex(target)} = null; // del${comment}`, py);
     }
     if ((m = /^(global|nonlocal)\s+(.+)$/.exec(code))) return this.emit(`// ${m[1]} ${m[2]}${comment}`, py);
+    if (generator && (m = /^yield\s+from\s+(.+)$/.exec(code))) {
+      const source = exValue(m[1]);
+      const list = /\.stream\(\)|^IntStream\.|\.boxed\(\)$/.test(source) && !/\.toList\(\)$/.test(source) ? `${source}.toList()` : source;
+      return this.emit(`${generator.yielded}.addAll(${list});${comment}`, py);
+    }
+    if (generator && (m = /^yield(?:\s+(.*))?$/.exec(code))) {
+      const parts = m[1] ? splitTopLevel(m[1]) : [];
+      const value = parts.length > 1 ? `Tuple.of(${parts.map(exValue).join(', ')})` : m[1] ? exValue(m[1]) : 'null';
+      return this.emit(`${generator.yielded}.add(${value});${comment}`, py);
+    }
     if ((m = /^yield\s+from\s+(.+)$/.exec(code))) return this.emit(`for (var item : ${ex(m[1])}) { yield item; } // yield from: delegate to a sub-generator${comment}`, py);
-    if ((m = /^yield\s*(.*)$/.exec(code))) return this.emit(`yield ${m[1] ? ex(m[1]) : 'null'}; // generator${comment}`, py);
+    if ((m = /^yield(?:\s+(.*))?$/.exec(code))) return this.emit(`yield ${m[1] ? ex(m[1]) : 'null'}; // generator${comment}`, py);
     if (isSingleLiteral(code)) {
       // Stray string expression (e.g. a docstring not directly under a header): keep as comment.
       const text = un(code).replace(/^"""\n?/, '').replace(/"""$/, '').replace(/^"|"$/g, '').replace(/\*\//g, '*&#47;');
@@ -1706,10 +1854,10 @@ class RuleTranslation {
       const target = m[1].trim();
       const op = m[2];
       const value = ex(m[3]);
-      const sub = /^(.+)\[(.+)\]$/.exec(target);
+      const sub = subscriptTarget(target);
       if (sub) {
-        const recv = ex(sub[1]);
-        const key = ex(sub[2]);
+        const recv = ex(sub[0]);
+        const key = ex(sub[1]);
         return this.emit(`${recv}.put(${key}, ${recv}.get(${key}) ${op} ${value});${comment}`, py);
       }
       const attr = /^(.+)\.(\w+)$/.exec(target);
@@ -1806,11 +1954,14 @@ class RuleTranslation {
       } else if (unpackTargets(target)) {
         this.emitUnpacking(unpackTargets(target)!, valueMasked, lits, py, comment);
       } else {
-        const sub = /^(.+)\[(.+)\]$/.exec(target);
+        const sub = subscriptTarget(target);
         const attr = /^(.+)\.(\w+)$/.exec(target);
         const setter = attr ? this.propertySetter(attr[2]) : undefined;
-        if (sub) {
-          this.emit(`${ex(sub[1])}.put(${ex(sub[2])}, ${valueJava});${comment}`, py);
+        const slice = sub && this.sliceStatement(sub[0], sub[1], valueJava, ex);
+        if (slice) {
+          this.emit(`${slice}${comment}`, py);
+        } else if (sub) {
+          this.emit(`${ex(sub[0])}.put(${ex(sub[1])}, ${valueJava});${comment}`, py);
         } else if (attr && setter) {
           this.emit(`${ex(attr[1])}.${setter}(${valueJava});${comment}`, py);
         } else {
@@ -1969,21 +2120,70 @@ class RuleTranslation {
     targets.forEach((raw, k) => {
       const target = raw.replace(/^\*/, '');
       if (target === UNDERSCORE_NAME) return;
+      const nested = nestedTargets(target);
       const value =
         k === star
           ? `${source}.subList(${k}, ${source}.size()${n - k - 1 > 0 ? ` - ${n - k - 1}` : ''})`
           : star >= 0 && k > star
             ? `${source}.get(${source}.size() - ${n - k})`
             : `${source}.get(${k})`;
+      if (nested) {
+        // `name, (f, t) = x`: the inner tuple gets a name of its own, then is unpacked in turn.
+        const inner = this.freeLocalName('inner');
+        out.push(`var ${inner} = ${value};`, ...this.unpackingLines(nested, inner, lits));
+        return;
+      }
       out.push(this.assignmentLine(target, value, ex));
     });
     return out;
   }
 
+  /**
+   * `del xs[a:b]` (no `value`) or `xs[a:b] = value` as Java statements on one line, or undefined
+   * when `key` is not a slice (or has a step, or the receiver is not a plain name):
+   *
+   *   del xs[a:b]   -> xs.subList(a, b).clear();
+   *   xs[a:b] = ys  -> xs.subList(a, b).clear(); xs.addAll(a, ys);
+   *   xs[:] = ys    -> xs.clear(); xs.addAll(ys);
+   *   xs[-2:] = ys  -> xs.subList(xs.size() - 2, xs.size()).clear(); xs.addAll(ys);
+   *
+   * A value that reads `xs` is copied first, since clearing would change it.
+   */
+  private sliceStatement(recvMasked: string, keyMasked: string, value: string | undefined, ex: (s: string) => string): string | undefined {
+    if (indexAtDepth0(keyMasked, /:/) < 0) return undefined;
+    const parts = splitTopLevel(keyMasked, ':').concat(['', '', '']).map((p) => p.trim());
+    if (parts[2] !== '') return undefined;
+    const recv = ex(recvMasked);
+    if (!/^[\w.]+$/.test(recv)) return undefined;
+    const lo = parts[0] === '' ? '' : ex(parts[0]);
+    const hi = parts[1] === '' ? '' : ex(parts[1]);
+    const whole = lo === '' && hi === '';
+    const range = whole ? recv : `${recv}.subList(${sliceBound(recv, lo, '0')}, ${sliceBound(recv, hi, `${recv}.size()`)})`;
+    const clear = `${range}.clear();`;
+    if (value === undefined || value === 'new ArrayList<>()') return clear;
+    let items = value;
+    let prefix = '';
+    if (new RegExp(`(?<![\\w.])${recv.replace(/\./g, '\\.')}(?![\\w])`).test(value)) {
+      items = this.freeLocalName('items');
+      prefix = `var ${items} = new ArrayList<>(${value}); `;
+    }
+    // Insert where the cleared range began; a range that ran to the end is refilled at the end.
+    let at = sliceBound(recv, lo, '0');
+    if (hi === '' && lo !== '') at = '';
+    else if (/\.size\(\)/.test(at)) {
+      const name = this.freeLocalName('at');
+      prefix += `int ${name} = ${at}; `;
+      at = name;
+    }
+    return `${prefix}${clear} ${recv}.addAll(${at && at !== '0' || (at === '0' && !whole) ? `${at}, ` : ''}${items});`;
+  }
+
   /** `target = value;` for one unpacking target: declares a new local, or assigns a field / item. */
   private assignmentLine(target: string, value: string, ex: (s: string) => string): string {
-    const sub = /^(.+)\[(.+)\]$/.exec(target);
-    if (sub) return `${ex(sub[1])}.put(${ex(sub[2])}, ${value});`;
+    const sub = subscriptTarget(target);
+    const slice = sub && this.sliceStatement(sub[0], sub[1], value, ex);
+    if (slice) return slice;
+    if (sub) return `${ex(sub[0])}.put(${ex(sub[1])}, ${value});`;
     if (!/^\w+$/.test(target)) {
       const attr = /^(.+)\.(\w+)$/.exec(target);
       const setter = attr ? this.propertySetter(attr[2]) : undefined;
@@ -2008,12 +2208,13 @@ class RuleTranslation {
     let v = valueMasked.trim();
     if (/^[(\[]/.test(v) && groupEndIndex(v) === v.length) v = v.slice(1, -1);
     const elems = splitTopLevel(v);
-    const names = targets.map((t) => t.replace(/^\*/, ''));
+    const names = boundNames(targets);
     const readsTarget = elems.some((e) => names.some((name) => new RegExp(`(?<![\\w.])${name.replace(/[.[\]]/g, '\\$&')}(?![\\w])`).test(e)));
 
     if (elems.length === targets.length && elems.length > 1 && !targets.some((t) => t.startsWith('*')) && !readsTarget) {
       targets.forEach((t, k) => {
         if (t === UNDERSCORE_NAME) return;
+        if (nestedTargets(t)) return this.emitUnpacking(nestedTargets(t)!, elems[k], lits, py, k === 0 ? comment : '');
         const value = exValue(elems[k]);
         if (!inFunction && /^\w+$/.test(t)) this.emitFieldOrLocal(t, this.inferValueType(elems[k], lits), value, py, k === 0 ? comment : '');
         else this.emit(`${this.assignmentLine(t, value, (s) => unmaskStrings(translateMaskedExpression(s, this.exprCtx(lits)), lits))}${k === 0 ? `${comment}` : ''}`, py);
@@ -2097,12 +2298,19 @@ class RuleTranslation {
 export class RuleBasedTranslator implements Translator {
   readonly name = 'rules' as const;
 
+  /** `resolveImports: false` keeps Python's imports as Java-looking lines (see `TranslateInput.pythonImports`). */
+  constructor(private readonly options: { resolveImports?: boolean } = {}) {}
+
   async translate(input: TranslateInput): Promise<TranslateResult> {
-    return translateWithRules(input);
+    return translateWithRules(this.options.resolveImports === false ? { ...input, pythonImports: true } : input);
   }
 }
 
 /** Synchronous entry point (used by tests and the CLI). */
 export function translateWithRules(input: TranslateInput): TranslateResult {
-  return new RuleTranslation(input).translate();
+  const result = new RuleTranslation(input).translate();
+  if (input.pythonImports) return result;
+  // Real imports for what the JDK index and the project scan resolve; no model is asked.
+  const plan = planImports(result, input.source, input.knownMembers?.modules ?? {}, input.knownMembers?.classes, input.basePackage);
+  return { ...result, ...applyImports(result, plan, renderImports(plan, undefined, '')) };
 }

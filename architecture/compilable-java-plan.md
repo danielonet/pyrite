@@ -81,7 +81,8 @@ helpers (all written as `trafilatura.compat.*`, which you can use as the seed):
 | `Py.split(s)` | `s.split()` without argument | whitespace runs, no empty strings |
 | `Py.splitlines`, `Py.partition`, `Py.count`, `Py.title` | same-named str methods | no direct equivalent |
 | `Py.isdigit/isspace/isprintable` | str predicates | **empty string is False** |
-| `Py.slice(s, start, end)` | `s[a:b]`, negative indexes | clamping and negative indexes |
+| `Py.slice(s, start, end[, step])` | `s[a:b]`, negative indexes | clamping and negative indexes; strings and lists; `null` = open bound |
+| `Py.at(s, i)` | `f()[-2]` | negative index on an expression evaluated once |
 | `Py.str(x)` / `Py.repr(x)` | `str(None)` → `"None"`, `repr(list)` | Java prints `null` / `[a, b]` |
 | `Py.unescape` | `html.unescape` | |
 | `Re.match/search/fullmatch/split/findall/sub/finditer/escape` | `re` module | `match` is anchored at the start, `split` keeps groups, `findall` returns groups, `sub` takes a function |
@@ -137,6 +138,64 @@ comprehensions (82), slices (64), `yield` (34).
 
 1.12 (star-unpacking) is done, and the dict-merge half of 2.3 (`{**d, ...}` was silently a set):
 stubs 1,055 -> 823. Next by count: comprehensions (75), slices (64), `yield` (33).
+
+The "tuple literal" bucket (298) turned out to be a regex catch-all; sorted properly, its causes
+were fixed together: subscript assignment with a subscripted key (`d[K[0]] = v`; `UPPER[...]` was
+read as a generic type), calls on values (`handlers[e](x)`, `f(a)(b)` -> a cast to the functional
+interface nested functions use; `type(self)(...)` -> `new Cls(...)`), `%` / `**` / `//` / `in`
+operands found by scanning instead of a one-level regex, `x in [a, b]` (read as a subscript on
+`in`), `int(s, base)`, builtin types as values (`int` -> `Integer.class`), `issubclass`,
+`{...}[k]`, `super(X, self).m()` and nested unpacking targets (`a, (b, c) = x`). Stubs 823 -> 398;
+files with no stub 54 -> 74. Next by count: comprehensions (58), slices (55), `yield` (32).
+
+Slices are done except extended-slice assignment (1.11, `xs[::2] = ys`): a plain name keeps
+`subList` with negative bounds from the end; a call/subscript receiver or a step uses
+`Py.slice`; `f()[-1]` -> `getLast()`, other negative indexes on expressions `Py.at`; slice
+assignment and `del` work on the `subList` view. Stubs 398 -> 280; files with no stub 74 -> 89.
+Next by count: comprehensions (51), `yield` (32); the rest is a mixed tail (about 180).
+
+Comprehensions are done: a scanner finds them at any depth, several
+`for` clauses flat-map, tuple targets read their parts from one lambda parameter. Stubs 280 ->
+217; files with no stub 89 -> 101. What the comprehension bucket still holds is `yield` stubbing
+its enclosing loop and `type(obj)(...)` (a reflective constructor call). Next by count: `yield`
+(1.16, 32 plus the loops it takes with it); then the mixed tail (about 160).
+
+1.16 (`yield`) is done, eager by default as planned: a generator collects into a `List` it
+returns (`.iterator()` when declared to return an `Iterator`). Generators that may never end are
+flagged (comment + warning) but not yet turned into a lazy `Iterator` class. `x = yield y` (send) is not
+handled. Stubs 217 -> 160; files with no stub 101 -> 103. What remains is a mixed tail: attributes
+of builtin types (`int.from_bytes`, 15), assignment through a property read (`f.__name__ = x`
+-> `f.getName() = x`, 12), `lambda` defaults (8), `type(x)(...)` and `getattr(...)(...)`
+(reflective calls, 10), and wrapped statements not yet sorted. Measuring `javac` errors on the
+gated output is the next useful step.
+
+**javac on the gated standard library** (161 files that parse, one package per module, JDK 21,
+`-XDshould-stop.at=FLOW` so attribution runs despite errors): 36,119 errors in 160 files.
+
+| Errors | Share | Cause | Plan |
+|---|---|---|---|
+| 10,543 | 29% | unknown name: undeclared locals (declared in a branch, 1.18), Python builtins (`NotImplemented`, `DeprecationWarning`), class attributes (`__module__`, `__dict__`) | 1.18, 0.3 |
+| 4,961 | 14% | Python module references (`os.path`, `sys.argv`, `import abc.ABCMeta`) | 3.x mapping table |
+| 4,897 | 14% | a method called on an `Object` (`x.get(0)`, `x.size()` on an untyped value) | 0.2 types |
+| 2,676 | 7% | unknown method (a Python API on a Java type, undefined function) | 0.3, mapping table |
+| 2,674 | 7% | runtime library missing (`Tuple`, `Py`, `@Property`) | 0.3 |
+| 2,401 | 7% | type mismatches on `Object` | 0.2 |
+| 1,755 | 5% | call arity (keyword arguments, defaults) | 0.4, 2.x |
+| 1,573 | 4% | truthiness on non-booleans (`if x`, `!x`) | `Py.truthy` (0.3) |
+| 1,137 | 3% | unknown class | |
+| 994 | 3% | checked exceptions | 2.x |
+| 877 | 2% | syntax javac rejects but tree-sitter accepts: 855 are `import os;` (a dot-less Python import) | 3.7 |
+
+The syntax javac rejects was 1,601 errors before this round; fixed: Python string escapes
+(`"\x00"`, `\a`, `\v`, unknown escapes like `\d`, `\s`), attributes named `int`/`float`,
+varargs before `**kwargs`/keyword-only parameters, decorator calls that are not valid
+annotations (`@Lru_cache(maxsize = 1, /* typed = */ true)`), `Class<?>.class`.
+
+3.7 for the rules engine: imports are resolved without a model by default (JDK index, project
+classes, Python imports as `// python:` comments), as the hybrid engine already did. javac errors
+36,119 -> 34,629; syntax javac rejects 877 -> 22. `scripts/measure-java.js --javac` reproduces
+these numbers. Its parse-level counts: 108 of 167 files need no stub, 128 stubs (`TODO(pyrite)`
+occurrences in the 161 files that parse).
 
 Every item here produced a javac syntax error. Add a parse gate: run the Java output
 through a Java parser (tree-sitter-java or `javac -proc:none` on the single file). On

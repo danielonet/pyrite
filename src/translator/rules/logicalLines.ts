@@ -109,8 +109,10 @@ export function splitLogicalLines(source: string): LogicalLine[] {
     const parts: string[] = [];
     let current = first;
     for (;;) {
+      // The comment is cut string-aware: `x == '#' and \` continues.
+      const code = splitOffComment(current, state).code;
       state = scan(current, state);
-      const continued = state.depth > 0 || state.str !== null || /\\\s*$/.test(current.replace(/#.*$/, ''));
+      const continued = state.depth > 0 || state.str !== null || /\\\s*$/.test(code);
       parts.push(current);
       if (!continued || i + 1 >= physical.length) break;
       i += 1;
@@ -181,7 +183,7 @@ function joinParts(parts: string[]): { text: string; comments: string[] } {
         if (split.comment) comments.push(split.comment);
         piece = split.code.replace(/\s+$/, '');
       }
-      piece = piece.replace(/\\\s*$/, '');
+      piece = piece.replace(/\s*\\\s*$/, '');
     }
     out += piece;
     state = scan(raw, state);

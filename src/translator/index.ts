@@ -16,6 +16,8 @@ export type EngineName = 'rules' | 'hybrid';
 
 export interface EngineConfig {
   engine: EngineName;
+  /** Replace Python's imports with real Java ones (both engines; default true). */
+  resolveImports?: boolean;
   /** Only used by the `hybrid` engine; unset fields take `DEFAULT_OLLAMA_OPTIONS`. */
   ollama?: Partial<OllamaOptions>;
 }
@@ -27,8 +29,9 @@ export function ollamaCacheFile(root: string, outputFolder: string): string {
 
 /** Build the translator for the configured engine. */
 export function createTranslator(config: EngineConfig): { translator: Translator; note?: string } {
+  const resolveImports = config.resolveImports ?? config.ollama?.resolveImports ?? true;
   if (config.engine === 'hybrid') {
-    return { translator: new HybridTranslator(new RuleBasedTranslator(), { ...DEFAULT_OLLAMA_OPTIONS, ...config.ollama }) };
+    return { translator: new HybridTranslator(new RuleBasedTranslator(), { ...DEFAULT_OLLAMA_OPTIONS, ...config.ollama, resolveImports }) };
   }
-  return { translator: new RuleBasedTranslator() };
+  return { translator: new RuleBasedTranslator({ resolveImports }) };
 }

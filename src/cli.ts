@@ -104,14 +104,15 @@ function printUsage(): void {
                         (default: stub, replace each one with a TODO(pyrite) stub that parses).
   --engine hybrid       Also rewrite hard functions with a local Ollama model (--ollama-url, --ollama-model),
                         and replace the Python-shaped imports with real Java ones.
-  --no-java-imports     With --engine hybrid: keep the rules engine's imports as they are.`);
+  --no-java-imports     Keep Python's imports as Java-looking lines (import os;) instead of real Java imports.`);
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const { translator, note } = createTranslator({
     engine: args.engine,
-    ollama: { resolveImports: args.javaImports, ...(args.root && { cacheFile: ollamaCacheFile(path.resolve(args.root), args.out) }), ...(args.ollamaUrl && { url: args.ollamaUrl }), ...(args.ollamaModel && { model: args.ollamaModel }) },
+    resolveImports: args.javaImports,
+    ollama: { ...(args.root && { cacheFile: ollamaCacheFile(path.resolve(args.root), args.out) }), ...(args.ollamaUrl && { url: args.ollamaUrl }), ...(args.ollamaModel && { model: args.ollamaModel }) },
   });
   if (note) console.error(`note: ${note}`);
 

@@ -79,6 +79,19 @@ export interface KnownMembers {
   classes?: Record<string, string>;
 }
 
+/** Index of the bracket that closes the one at index 0, or -1. */
+function closingIndex(text: string): number {
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if ('([{'.includes(text[i])) depth += 1;
+    else if (')]}'.includes(text[i])) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
 /** Java type of a literal / simple value on the right-hand side of an assignment; 'var' when unknown. */
 export function inferTypeFromMaskedValue(masked: string, literals: string[]): string {
   const v = masked.trim();
@@ -89,12 +102,14 @@ export function inferTypeFromMaskedValue(masked: string, literals: string[]): st
   if (isSingleLiteral(v)) return 'String';
   if (v === 'True' || v === 'False') return 'boolean';
   if (v === 'None') return 'Object /* nullable */';
-  if (/^\[/.test(v) || /^list\(/.test(v)) return 'List<Object>';
+  // A literal is the value only when its brackets span it: `{1: "a"}[k]` is an element.
+  const whole = /^[[{(]/.test(v) && closingIndex(v) === v.length - 1;
+  if ((/^\[/.test(v) && whole) || /^list\(/.test(v)) return 'List<Object>';
   // `{k: v}`, `{}` and `{**a, **b}` are dicts; `{a, b}` is a set.
-  if (/^\{/.test(v)) return indexAtDepth0(v.slice(1, -1), /:/) >= 0 || v === '{}' || /^\{\s*\*\*/.test(v) ? 'Map<String, Object>' : 'Set<Object>';
+  if (/^\{/.test(v) && whole) return indexAtDepth0(v.slice(1, -1), /:/) >= 0 || v === '{}' || /^\{\s*\*\*/.test(v) ? 'Map<String, Object>' : 'Set<Object>';
   if (/^dict\(/.test(v)) return 'Map<String, Object>';
   if (/^set\(/.test(v)) return 'Set<Object>';
-  if (/^\(/.test(v)) return 'Tuple';
+  if (/^\(/.test(v) && whole && (v === '()' || indexAtDepth0(v.slice(1, -1), /,/) >= 0)) return 'Tuple';
   if (/^lambda\b/.test(v)) return 'Function<?, ?>';
   const ctor = /^([A-Z]\w*)\(/.exec(v);
   if (ctor) return ctor[1];

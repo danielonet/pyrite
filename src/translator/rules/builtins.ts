@@ -112,7 +112,8 @@ function plainString(ctx: CallContext, token: string): string | undefined {
 }
 
 const HANDLERS: Record<string, Handler> = {
-  len: ([a]) => (a ? `${paren(a)}.size()` : undefined),
+  // A string literal has a length; anything else is taken for a collection.
+  len: ([a]) => (a ? `${paren(a)}.${PLACEHOLDER_ONLY.test(a.trim()) ? 'length' : 'size'}()` : undefined),
   sum: ([a], kw) => (a && !kw.size ? `${streamOf(a)}.mapToDouble(Number::doubleValue).sum()` : undefined),
   any: ([a]) => {
     if (!a) return undefined;
@@ -200,6 +201,14 @@ const HANDLERS: Record<string, Handler> = {
   dict: (args, kw) => {
     if (!args.length && !kw.size) return 'new HashMap<>()';
     if (!args.length) return `Map.of(${[...kw].map(([k, v]) => `"${k}", ${v}`).join(', ')})`;
+    const s = stripGenerator(args[0]);
+    if (args.length === 1 && isStream(s)) {
+      // dict(pairs): `.map(x -> Tuple.of(k, v))` maps straight into toMap; other pairs are read by index.
+      const pair = /^(.*)\.map\((\w+) -> Tuple\.of\((.*)\)\)$/.exec(s);
+      const kv = pair ? splitTopLevel(pair[3]) : [];
+      if (pair && kv.length === 2) return `${pair[1]}.collect(Collectors.toMap(${pair[2]} -> ${kv[0].trim()}, ${pair[2]} -> ${kv[1].trim()}))`;
+      return `${s}.collect(Collectors.toMap(pair -> pair.get(0), pair -> pair.get(1)))`;
+    }
     return `new HashMap<>(${args.join(', ')})`;
   },
   min: (args, kw) => {
@@ -215,6 +224,16 @@ const HANDLERS: Record<string, Handler> = {
   pow: ([a, b]) => (a && b ? `Math.pow(${a}, ${b})` : undefined),
   divmod: ([a, b]) => (a && b ? `Tuple.of(Math.floorDiv(${a}, ${b}), Math.floorMod(${a}, ${b}))` : undefined),
   chr: ([a]) => (a ? `(char) ${paren(a)}` : undefined),
+  // `int(s, 16)` parses in that base; base 0 reads the prefix (`0x1F`, `0o17`), as `decode` does.
+  int: ([x, base]) => (x && base !== undefined ? (base.trim() === '0' ? `Integer.decode(${x})` : `Integer.parseInt(${x}, ${base})`) : undefined),
+  issubclass: ([c, t]) => {
+    if (!c || !t) return undefined;
+    const tuple = /^Tuple\.of\((.*)\)$/.exec(t.trim());
+    const types = tuple ? splitTopLevel(tuple[1]) : wrappedInParens(t.trim()) ? splitTopLevel(t.trim().slice(1, -1)) : [t.trim()];
+    // A class literal takes no type arguments: `type` -> `Class<?>` -> `Class.class`.
+    const tests = types.map((ty) => `${(/^[a-z]\w*$/.test(ty.trim()) ? boxed(translateType(ty)) : ty.trim()).replace(/<.*>$/, '')}.class.isAssignableFrom(${c})`);
+    return tests.length === 1 ? tests[0] : `(${tests.join(' || ')})`;
+  },
   ord: ([a]) => (a ? `(int) ${paren(a)}` : undefined),
   repr: ([a]) => (a ? `String.valueOf(${a})` : undefined),
 };

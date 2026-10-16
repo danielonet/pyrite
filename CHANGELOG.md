@@ -8,6 +8,49 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **Generators are collected eagerly.** Java has no `yield` that suspends a
+  method, and `yield x;` was left as text. A generator function now declares
+  `List<T> yielded = new ArrayList<>();`, `yield x` -> `yielded.add(x)`,
+  `yield from xs` -> `yielded.addAll(xs)`, and a bare `return` or the end of
+  the body returns the list (`yielded.iterator()` when the function is
+  declared to return an `Iterator`). Callers iterate it as before. A generator
+  that may never end (`while True:` with no `return` or `break`) is flagged
+  with a comment and a warning: it needs a lazy `Iterator`. Nested generator functions work the same way inside their
+  lambda. Stubs on the Python 3.12 standard library: 217 -> 160.
+- **Comprehensions at any depth.** Comprehensions and generator expressions
+  are found by scanning instead of regexes that allowed one level of nested
+  brackets: `[[c for c in p if c] for p in paths]` nests, and several `for`
+  clauses flat-map (`[x * y for x in xs for y in ys]` ->
+  `xs.stream().flatMap(x -> ys.stream().map(y -> x * y)).toList()`). A tuple
+  target was a two-parameter lambda on a stream (`((k, v)) -> ...`); it is now
+  one parameter whose parts are read where the names were used (`item.get(1)`,
+  or `item.getKey()` / `item.getValue()` over `.items()`). `dict(pairs)` of a
+  generator collects into a map. In loops, `for x in a, b, c:` walks
+  `List.of(a, b, c)`, and nested targets unpack under `enumerate(...)` and
+  `.items()` (`for i, (op, arg) in enumerate(ops):`). Stubs on the Python 3.12
+  standard library: 280 -> 217.
+- **Slices.** A slice of a plain name stays `xs.subList(a, b)`, with negative
+  bounds counted from the end (`xs[-n:]` -> `xs.subList(xs.size() - n,
+  xs.size())`); `xs[:]` is a copy. A slice of a call or subscript
+  (`f()[2:]`, `x[0][1:]`) or with a step goes through the runtime helper
+  `Py.slice(expr, lo, hi[, step])`, so the expression is evaluated once;
+  `f()[-1]` -> `.getLast()`, other negative indexes `Py.at(expr, -n)`. Slice
+  assignment replaces the range (`xs[a:b] = ys` -> `xs.subList(a,
+  b).clear(); xs.addAll(a, ys);`, copying `ys` first when it reads `xs`), and
+  `del xs[a:b]` clears it. Extended-slice assignment (`xs[::2] = ys`) is still
+  stubbed. Stubs on the Python 3.12 standard library: 398 -> 280.
+- **Calls on values.** Python calls whatever an expression returns
+  (`handlers[event](self, frame)`, `factory(name)(data)`); Java only calls
+  methods, so the value is cast to the functional interface nested functions
+  use and called through it (`((BiFunction<Object, Object, Object>)
+  handlers.get(event)).apply(this, frame)`). `type(self)(...)` and
+  `self.__class__(...)` construct the enclosing class.
+- **Nested unpacking targets.** `name, (a, b) = x` and `for k, (a, b) in
+  pairs:` unpack the inner tuple through a named local.
+- **Builtin types.** `int(s, 16)` -> `Integer.parseInt(s, 16)` (`int(s, 0)` ->
+  `Integer.decode(s)`); a builtin type used as a value is its class
+  (`d[int] = f` -> `d.put(Integer.class, f)`); `issubclass(T, int)` ->
+  `Integer.class.isAssignableFrom(T)`.
 - **Star-unpacking.** `f(*xs)` -> `f(xs.toArray())`; mixed arguments
   `f(a, *xs)` become one array built from a stream, for the varargs
   parameter. `[*a, b]`, `{*a, b}` and `(*a, b)` concatenate streams
@@ -95,10 +138,24 @@ All notable changes to Pyrite are recorded here. The format follows
   (static imports for functions and constants), Lombok for its annotations,
   and, for the names left over, the local model, whose suggestions are checked
   against the JDK. Python imports with no Java counterpart stay as
-  `// python: ...` comments. New setting `pyrite.ollama.resolveImports`
-  (default on); CLI `--no-java-imports`.
+  `// python: ...` comments. Setting `pyrite.resolveImports` (default on);
+  CLI `--no-java-imports`.
 
 ### Changed
+
+- **The rules engine writes real Java imports too.** Python's imports used to
+  stay as Java-looking lines (`import os;`, `import typing.List;`): readable,
+  but not Java (`import os;` alone was 855 javac syntax errors on the
+  standard library). Both engines now import the JDK and project classes the
+  view uses and keep Python imports as `// python: ...` comments; only the
+  hybrid engine asks the model about names the index cannot resolve. An
+  import inside a one-line body (`if not re: import re`) joins the import
+  block. `pyrite.resolveImports: false` (CLI `--no-java-imports`) keeps the
+  Python-shaped lines.
+- **`scripts/measure-java.js`** (`npm run measure -- <folder> [--javac]`)
+  reports how far the views of a folder of Python files are from compiling:
+  files that need no parse-gate stub, the stubs, and with `--javac` the
+  compiler's errors grouped by cause.
 
 - **The view is a standard Java project.** Views are written to
   `.java-view/src/main/java`, and test modules (`test_*.py`, `*_test.py`,
@@ -129,6 +186,39 @@ All notable changes to Pyrite are recorded here. The format follows
   with a meter, then right-aligned rows for classes, methods, fields,
   problems (each opens the warnings list) and the engine and
   translate-on-save settings.
+
+### Fixed
+
+- `d[K[0]] = v` split the target at the wrong bracket (`d[K.put(0], v)`), and
+  a subscript on an UPPER_CASE name was read as a generic type (`K<0>`).
+- `%`, `**`, `//` and `in` took at most one level of parentheses as an
+  operand: `"%s" % f(g(x))` became `String.format("%s", f)(g(x))`. Operands
+  are now found by scanning, and `fmt % (a, b)` with a non-literal format is
+  formatting too. `x in [a, b]` read `in[...]` as a subscript.
+- Errors javac reports that the parse gate's parser accepts (found by compiling
+  the gated standard library): Python string escapes are translated (`\x00`
+  -> `\000`, `\a`, `\v`, `\U0001F600` -> a surrogate pair; an unknown escape
+  such as `\d` keeps its backslash, and `\s` no longer turns into a space);
+  `\"` inside a single-quoted string ended the Java string; an attribute named
+  `int` or `float` is renamed (`value.int` -> `value.int_`); `*args` before
+  `**kwargs` or keyword-only parameters is an array, since Java varargs must
+  come last; a decorator call whose arguments are not annotation constants
+  (`@wraps(f)`) stays a comment instead of an invalid annotation;
+  `issubclass(x, type)` -> `Class.class.isAssignableFrom(x)`.
+- A variable named like `yielded` was read as a `yield` statement.
+- A function containing a nested generator was itself typed as a generator.
+- `Generator[int, None, None]` became `Iterator<Integer, Void, Void>`; it is
+  `Iterator<Integer>`. `Callable[[A, B, C], R]` became `Function<(A, B, C),
+  R>`; it is `Function<Object[], R>`, as nested functions with three or more
+  parameters are.
+- A backslash continuation on a line with `#` inside a string (`x == '#' and
+  \`) was not joined: the comment was cut without regard to strings.
+- `len("abc")` -> `"abc".length()`, not `.size()`.
+- `{"a": 1}[k]` is an element of the map, not a map; `super(X, self).m()` ->
+  `super.m()`.
+
+Together with the additions above: stubs on the Python 3.12 standard library
+823 -> 160, files with no stub 54 -> 103.
 
 ## [0.2.1] - 2026-09-17
 

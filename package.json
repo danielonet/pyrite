@@ -172,11 +172,6 @@
           "minimum": 1,
           "description": "At most this many functions per file are sent to Ollama; the rest keep the rules translation."
         },
-        "pyrite.ollama.resolveImports": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "With the `hybrid` engine, replace the Python-shaped imports (`import logging;`, `import typing.Dict;`, `java.util.*`) with explicit imports of real Java classes: JDK classes from an index of the real JDK, the classes Pyrite generates for your own modules, and Lombok for its annotations. Only the names left over are sent to the model, and every class it suggests is checked against the JDK. A step towards a Java view that compiles."
-        },
         "pyrite.outputFolder": {
           "type": "string",
           "default": ".java-view",
@@ -238,6 +233,11 @@
           "default": true,
           "description": "Use Lombok-style annotations instead of spelling out boilerplate: a class whose __init__ only assigns its parameters to fields gets @AllArgsConstructor, a trivial __str__/__repr__ becomes @ToString, a trivial __eq__/__hash__ becomes @EqualsAndHashCode, a @property/@x.setter pair that just wraps a field becomes @Getter/@Setter on that field, and a dataclass-like class (@dataclass, NamedTuple, pydantic BaseModel, ...) becomes @Data. Methods that don't match these simple shapes are left spelled out."
         },
+        "pyrite.resolveImports": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Replace Python's imports with real Java imports: JDK classes from an index of the real JDK, the classes Pyrite generates for your own modules, and Lombok for its annotations. Python imports with no Java counterpart are kept as `// python: ...` comments. When off, the view keeps Python-shaped lines (`import logging;`, `import typing.Dict;`) that read like the Python but are not Java. With the `hybrid` engine, names the index cannot resolve are sent to the model, and every class it suggests is checked against the JDK."
+        },
         "pyrite.invalidJava": {
           "type": "string",
           "enum": [
@@ -268,6 +268,7 @@
     "package": "vsce package",
     "build:icon-font": "node scripts/build-icon-font.js",
     "build:jdk-index": "node scripts/build-jdk-index.js",
+    "measure": "npm run compile && node scripts/measure-java.js",
     "install:local": "bash scripts/build-and-install.sh",
     "uninstall:local": "bash scripts/uninstall.sh",
     "publish:marketplace": "bash scripts/publish-marketplace.sh"

@@ -61,7 +61,7 @@ interface Settings {
   ollamaModel: string;
   ollamaTimeoutSeconds: number;
   ollamaMaxFunctions: number;
-  ollamaResolveImports: boolean;
+  resolveImports: boolean;
 }
 
 function settings(): Settings {
@@ -81,7 +81,7 @@ function settings(): Settings {
     ollamaModel: cfg.get<string>('ollama.model', 'qwen2.5-coder:7b'),
     ollamaTimeoutSeconds: cfg.get<number>('ollama.timeoutSeconds', 300),
     ollamaMaxFunctions: cfg.get<number>('ollama.maxFunctionsPerFile', 10),
-    ollamaResolveImports: cfg.get<boolean>('ollama.resolveImports', true),
+    resolveImports: cfg.get<boolean>('resolveImports', true),
   };
 }
 
@@ -92,14 +92,14 @@ function ollamaOptions(s: Settings, root: string): Partial<OllamaOptions> {
     model: s.ollamaModel,
     timeoutMs: s.ollamaTimeoutSeconds * 1000,
     maxBlocksPerFile: s.ollamaMaxFunctions,
-    resolveImports: s.ollamaResolveImports,
+    resolveImports: s.resolveImports,
     cacheFile: ollamaCacheFile(root, s.outputFolder),
   };
 }
 
 function buildTranslator(root: string): Translator {
   const s = settings();
-  const { translator, note } = createTranslator({ engine: s.engine, ollama: ollamaOptions(s, root) });
+  const { translator, note } = createTranslator({ engine: s.engine, resolveImports: s.resolveImports, ollama: ollamaOptions(s, root) });
   if (note) {
     output.appendLine(note);
     void vscode.window.showWarningMessage(note);

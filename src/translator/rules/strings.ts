@@ -94,9 +94,51 @@ function escapeForJava(body: string, singleQuoted: boolean): string {
   let s = body;
   if (singleQuoted) {
     // Python allows unescaped " inside '...' and escaped \' which Java does not need.
-    s = s.replace(/\\'/g, "'").replace(/"/g, '\\"');
+    // Escape pairs are read whole, so `\"` (an escaped quote) and `\\` stay what they were.
+    s = s.replace(/\\([\s\S])|"/g, (m, esc?: string) => (esc === undefined ? '\\"' : esc === "'" ? "'" : m));
   }
-  return s;
+  return s.includes('\\') ? translateEscapes(s) : s;
+}
+
+/** `\ooo` for a char below 256: unlike `\u000a`, an octal escape is not pre-lexed by javac. */
+function octalEscape(code: number): string {
+  return `\\${code.toString(8).padStart(3, '0')}`;
+}
+
+/** A code point as Java escapes (a surrogate pair above the BMP); never `\u000a`-style line breaks. */
+function codePointEscape(code: number): string {
+  if (code < 0x100) return octalEscape(code);
+  if (code < 0x10000) return `\\u${code.toString(16).padStart(4, '0')}`;
+  const v = code - 0x10000;
+  return codePointEscape(0xd800 + (v >> 10)) + codePointEscape(0xdc00 + (v & 0x3ff));
+}
+
+/**
+ * Python escapes as Java ones. Java lacks `\x`, `\a`, `\v`, `\U` and `\N{...}`, and rejects
+ * escapes Python keeps as a backslash plus the character (`"\d"` is `\\d` in Python); `\s`
+ * even means a space in Java. Escapes both languages share are kept.
+ */
+function translateEscapes(text: string): string {
+  return text.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|N\{[^}]*\}|[0-7]{1,3}|[\s\S])/g, (m, esc: string) => {
+    switch (esc[0]) {
+      case 'x':
+        return octalEscape(parseInt(esc.slice(1), 16));
+      case 'u':
+      case 'U':
+        return codePointEscape(parseInt(esc.slice(1), 16));
+      case 'a':
+        return octalEscape(7);
+      case 'v':
+        return octalEscape(11);
+      case 'N':
+        return `\\\\${esc}`; // a named character: no Java escape, kept as text
+      case '\n':
+        return m; // line continuation inside a text block
+      default:
+        if (/^[0-7]/.test(esc)) return parseInt(esc, 8) < 256 ? m : codePointEscape(parseInt(esc, 8));
+        return /^[btnfr"'\\]$/.test(esc) ? m : `\\\\${esc}`;
+    }
+  });
 }
 
 /** Hook set by the expression module so f-string fields can be translated recursively. */

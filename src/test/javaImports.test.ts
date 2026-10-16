@@ -60,7 +60,7 @@ test('names inside strings and comments are not code', () => {
 });
 
 test('the plan resolves JDK, project and static imports without the model', async () => {
-  const rules = await new RuleBasedTranslator().translate(INPUT);
+  const rules = await new RuleBasedTranslator({ resolveImports: false }).translate(INPUT);
   const plan = planImports(rules, SOURCE, KNOWN.modules, KNOWN.classes);
   assert.deepEqual(plan.jdk, ['java.util.ArrayList', 'java.util.List']);
   assert.deepEqual(plan.project, ['app.Models.Customer', 'app.Models.Order']);
@@ -149,7 +149,7 @@ test('decorators kept as annotations are listed but not sent to the model', asyn
 });
 
 test('resolveImports: false keeps the rules imports', async () => {
-  const rules = await new RuleBasedTranslator().translate(INPUT);
+  const rules = await new RuleBasedTranslator({ resolveImports: false }).translate(INPUT);
   const result = await hybrid(async () => assert.fail('the model must not be asked'), { resolveImports: false }).translate(INPUT);
   assert.equal(result.java, rules.java);
 });
@@ -175,7 +175,7 @@ test('the project scan records each module class and its top-level classes', asy
 test('imports the rules prefixed with the base package still resolve to project classes', async () => {
   const source = 'from .models import Order\n\ndef make() -> Order:\n    return Order()\n';
   const knownMembers = { properties: {}, attributes: [], returnTypes: {}, fieldTypes: {}, modules: { 'app.models': 'shop.app.Models' } };
-  const rules = await new RuleBasedTranslator().translate({ source, relativePath: 'app/main.py', basePackage: 'shop', knownMembers });
+  const rules = await new RuleBasedTranslator({ resolveImports: false }).translate({ source, relativePath: 'app/main.py', basePackage: 'shop', knownMembers });
   assert.ok(rules.java.includes('import shop.app.models.Order;'), rules.java);
   const plan = planImports(rules, source, knownMembers.modules, {}, 'shop');
   assert.deepEqual(plan.project, ['shop.app.Models.Order']);
@@ -183,7 +183,7 @@ test('imports the rules prefixed with the base package still resolve to project 
 
 test('a class named like its module is imported as the module class itself', async () => {
   const source = 'from .order_service import OrderService\n\ndef make() -> OrderService:\n    return OrderService()\n';
-  const rules = await new RuleBasedTranslator().translate({ source, relativePath: 'app/main.py' });
+  const rules = await new RuleBasedTranslator({ resolveImports: false }).translate({ source, relativePath: 'app/main.py' });
   const plan = planImports(rules, source, { 'app.order_service': 'app.OrderService' });
   assert.deepEqual(plan.project, ['app.OrderService']);
 });

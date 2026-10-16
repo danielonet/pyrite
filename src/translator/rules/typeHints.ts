@@ -134,8 +134,15 @@ export function translateType(hint: string | undefined | null, opts: { box?: boo
         if (ps.length === 0) return `Supplier<${ret}>`;
         if (ps.length === 1) return `Function<${ps[0]}, ${ret}>`;
         if (ps.length === 2) return `BiFunction<${ps[0]}, ${ps[1]}, ${ret}>`;
-        return `Function<(${ps.join(', ')}), ${ret}>`;
+        return `Function<Object[], ${ret}>`; // three or more parameters arrive as one array
       }
+      // Generator[Yield, Send, Return]: Java iterators carry only the yielded type.
+      case 'Generator':
+      case 'AsyncGenerator':
+      case 'AsyncIterator':
+        return `Iterator<${translateType(args[0], { box: true })}>`;
+      case 'AsyncIterable':
+        return `Iterable<${translateType(args[0], { box: true })}>`;
       case 'ClassVar':
       case 'Annotated':
         return translateType(args[0], opts);

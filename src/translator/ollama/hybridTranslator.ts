@@ -139,7 +139,8 @@ export class HybridTranslator implements Translator {
   ) {}
 
   async translate(input: TranslateInput): Promise<TranslateResult> {
-    const base = await this.rules.translate(input);
+    // The Python-shaped imports are resolved below, with the model for what the index cannot.
+    const base = await this.rules.translate({ ...input, pythonImports: true });
     const warnings = [...base.warnings];
     let view: JavaView = base;
     let usedModel = false;

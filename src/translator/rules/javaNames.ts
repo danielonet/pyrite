@@ -8,6 +8,7 @@
  *
  * `int`, `float` and `super` are left alone: Python code uses them as builtins and type hints
  * far more often than as variable names, and the translator gives those uses a Java meaning.
+ * After a dot they can only be attributes (`value.int` -> `value.int_`).
  */
 
 import { LogicalLine } from './logicalLines';
@@ -43,9 +44,12 @@ function insideBrackets(code: string, at: number): boolean {
   return depth > 0;
 }
 
+/** `int` / `float` after a dot: an attribute (`value.int`), never the builtin. */
+const PRIMITIVE_ATTRIBUTE = /(?<=\.\s*)(int|float)(?![\w\u0001])/g;
+
 /** Rename reserved identifiers in the code part of one masked statement, except names in `keep`. */
 function renameInCode(code: string, isBinding: boolean, isCase: boolean, keep: Set<string>): string {
-  return code.replace(RESERVED_WORD, (word: string, _w: string, offset: number, whole: string) => {
+  return code.replace(PRIMITIVE_ATTRIBUTE, '$1_').replace(RESERVED_WORD, (word: string, _w: string, offset: number, whole: string) => {
     if (keep.has(word)) return word;
     // `match` patterns: `case _:` and `case` itself are Python syntax, not names.
     if (isCase && (word === '_' || (word === 'case' && /^\s*$/.test(whole.slice(0, offset))))) return word;

@@ -61,6 +61,14 @@ export interface TranslateInput {
    * Defaults to none, so the package is the folder path alone.
    */
   basePackage?: string;
+  /**
+   * Keep Python's imports as Java-looking lines (`import os;`, `import typing.List;`) instead of
+   * resolving them. Those lines read like the Python but are not Java. The hybrid engine sets
+   * this: it resolves the imports itself, asking the model for what the JDK index cannot.
+   * Defaults to false: the rules engine imports real JDK and project classes and keeps the
+   * Python imports as `// python: ...` comments.
+   */
+  pythonImports?: boolean;
 }
 
 export type SymbolKind = 'class' | 'method' | 'field';

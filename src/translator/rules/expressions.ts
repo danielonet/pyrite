@@ -56,6 +56,134 @@ function rewriteLocalFunctionCalls(text: string, functions: Map<string, LocalFun
   return t;
 }
 
+/** Start of the postfix expression (`a.b(c).get(d)`) that ends just before `end`. */
+function postfixStart(text: string, end: number): number {
+  let k = end;
+  while (k > 0) {
+    const ch = text[k - 1];
+    if (ch === ')' || ch === ']') {
+      let depth = 0;
+      let j = k - 1;
+      for (; j >= 0; j -= 1) {
+        if (text[j] === ')' || text[j] === ']') depth += 1;
+        else if (text[j] === '(' || text[j] === '[') {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      if (j < 0) return k;
+      k = j;
+    } else if (/[\w.\x01]/.test(ch)) k -= 1;
+    else break;
+  }
+  return k;
+}
+
+/** A primitive cast in front of an operand, as the builtin rules write `int(x)` / `float(x)`. */
+const CAST = /^\((?:int|long|double|float|char|boolean)\)\s*/;
+const CAST_BEFORE = /\((?:int|long|double|float|char|boolean)\)\s*$/;
+
+/** End of the operand that starts at `start` (after spaces): `-x`, `f(a)[0].b`, `(a + b)`, `"s"`; `start` when none. */
+function postfixEnd(text: string, start: number): number {
+  let k = start;
+  while (text[k] === ' ') k += 1;
+  if (text[k] === '-') k += 1;
+  // A cast belongs to its operand: `(double) (b)`.
+  const cast = CAST.exec(text.slice(k));
+  if (cast) k += cast[0].length;
+  const first = k;
+  if (text.startsWith('new ', k)) k += 4;
+  for (;;) {
+    const ch = text[k];
+    if (ch === '(' || ch === '[') {
+      // A group starts an operand, or calls / subscripts the name before it.
+      const end = groupEnd(text, k);
+      if (end < 0) return k;
+      k = end;
+    } else if (ch !== undefined && /[\w\x01]/.test(ch)) {
+      if (k > first && /[)\]\w\x01]/.test(text[k - 1]) && !/[\w\x01]/.test(text[k - 1])) return k;
+      k += 1;
+    } else if (ch === '.' && k > first && /[\w\x01]/.test(text[k + 1] ?? '')) k += 1;
+    else if (ch === '.' && k === first && /\d/.test(text[k + 1] ?? '')) k += 1;
+    else return k > first ? k : start;
+  }
+}
+
+/**
+ * Rewrite every `left <op> right` where `op` matches `op` (a global regex) and both sides are
+ * whole postfix expressions, found by scanning (so `f(g(x)) ** 2` takes all of `f(g(x))`).
+ * `build` returns the replacement, or undefined to leave that occurrence alone.
+ */
+function rewriteInfix(text: string, op: RegExp, build: (left: string, right: string, match: RegExpExecArray) => string | undefined): string {
+  let t = text;
+  op.lastIndex = 0;
+  for (let m = op.exec(t); m; m = op.exec(t)) {
+    let leftEnd = m.index;
+    while (leftEnd > 0 && t[leftEnd - 1] === ' ') leftEnd -= 1;
+    let leftStart = postfixStart(t, leftEnd);
+    const cast = CAST_BEFORE.exec(t.slice(0, leftStart));
+    if (cast) leftStart -= cast[0].length;
+    const rightStart = m.index + m[0].length;
+    const rightEnd = postfixEnd(t, rightStart);
+    const left = t.slice(leftStart, leftEnd);
+    const right = t.slice(rightStart, rightEnd).trim();
+    const out = left && right ? build(left, right, m) : undefined;
+    if (out === undefined) continue;
+    t = t.slice(0, leftStart) + out + t.slice(rightEnd);
+    op.lastIndex = leftStart + out.length;
+  }
+  return t;
+}
+
+/** `(a, b)` -> [`a`, `b`] when `text` is a parenthesized group with a top-level comma. */
+function tupleItems(text: string): string[] | undefined {
+  if (!text.startsWith('(') || groupEnd(text, 0) !== text.length) return undefined;
+  const items = splitTopLevel(text.slice(1, -1)).map((s) => s.trim()).filter(Boolean);
+  return items.length > 1 || /,\s*$/.test(text.slice(1, -1)) ? items : undefined;
+}
+
+/**
+ * A call on a value that is not a name: Python calls whatever an expression returns
+ * (`handlers[event](self, frame)`, `factory(name)(data)`). Java only calls methods, so the
+ * value is cast to the functional interface that nested functions become (see
+ * `translateNestedDef`) and called through it:
+ *
+ *   handlers.get(event)(this, frame)  -> ((BiFunction<Object, Object, Object>) handlers.get(event)).apply(this, frame)
+ *   type(self)(a, b) / self.__class__(a, b)  -> new Point(a, b)
+ */
+function rewriteCallsOnValues(text: string, className: string | undefined): string {
+  let t = text;
+  for (let i = t.indexOf(')('); i >= 0; i = t.indexOf(')(', i + 1)) {
+    const start = postfixStart(t, i + 1);
+    const callee = t.slice(start, i + 1);
+    // The callee must itself end in a call or subscript (`f(x)`, `m.get(k)`), not a cast `(int)`.
+    if (!/[\w>]\(/.test(callee) && !/\.get\(/.test(callee)) continue;
+    const end = groupEnd(t, i + 1);
+    if (end < 0) break;
+    const args = t.slice(i + 2, end - 1);
+    let call: string;
+    if (/^this\.getClass\(\)$/.test(callee)) {
+      if (!className) continue;
+      call = `new ${className}(${args})`;
+    } else if (/\.getClass\(\)$/.test(callee)) {
+      continue; // a reflective constructor call: no plain Java equivalent
+    } else {
+      const items = splitTopLevel(args).filter((a) => a.trim() !== '');
+      const spread = items.length === 1 && /\.toArray\(\)$/.test(items[0].trim());
+      call = spread || items.length > 2
+        ? `((Function<Object[], Object>) ${callee}).apply(${spread ? items[0].trim() : `new Object[] {${args}}`})`
+        : items.length === 0
+          ? `((Supplier<Object>) ${callee}).get()`
+          : items.length === 1
+            ? `((Function<Object, Object>) ${callee}).apply(${args})`
+            : `((BiFunction<Object, Object, Object>) ${callee}).apply(${args})`;
+    }
+    t = t.slice(0, start) + call + t.slice(end);
+    i = start;
+  }
+  return t;
+}
+
 const S = SIMPLE_OPERAND;
 
 /** Python exception names that have a natural Java counterpart. */
@@ -110,62 +238,152 @@ export function indexAtDepth0(text: string, needle: RegExp, from = 0): number {
   return -1;
 }
 
-function lambdaParams(vars: string): string {
-  const parts = splitTopLevel(vars).map((v) => v.trim()).filter(Boolean);
-  if (parts.length === 1 && /^\w+$/.test(parts[0])) return parts[0];
-  return `(${parts.join(', ')})`;
+/**
+ * Index of the whitespace before keyword `word` at bracket depth 0 in `text` (from `from`),
+ * with whitespace after it too; -1 when there is none.
+ */
+function keywordAtDepth0(text: string, word: string, from = 0): number {
+  let depth = 0;
+  for (let i = from; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    else if (depth === 0 && /\s/.test(ch) && text.startsWith(word, i + 1) && /\s/.test(text[i + 1 + word.length] ?? '')) return i;
+  }
+  return -1;
 }
 
-// Sub-expression patterns allowing one level of nested brackets of the same kind.
-const G = '(?:[^()]|\\([^()]*\\))+?';
-const L = '(?:[^\\[\\]]|\\[[^\\[\\]]*\\])+?';
-const B = '(?:[^{}]|\\{[^{}]*\\})+?';
+interface CompClause {
+  targets: string;
+  iter: string;
+  conds: string[];
+}
 
-/** Rewrites list/set/dict comprehensions and generator expressions into stream pipelines. */
-function rewriteComprehensions(text: string): string {
-  // Every comprehension has ` for `; without it the nested-bracket regexes below would still
-  // crawl a large literal (a 30 KB dict table) for seconds.
-  if (!/\sfor\s/.test(text)) return text;
-  const build = (expr: string, vars: string, iter: string, cond: string | undefined, terminal: string) => {
-    const p = lambdaParams(vars);
-    let out = streamOf(iter.trim());
-    if (cond) out += `.filter(${p} -> ${cond.trim()})`;
-    if (expr.trim() !== vars.trim()) out += `.map(${p} -> ${expr.trim()})`;
-    return out + terminal;
-  };
-  let prev = '';
-  let cur = text;
-  let guard = 0;
-  while (prev !== cur && guard < 20) {
-    prev = cur;
-    guard += 1;
-    // dict comprehension {k: v for x in it if c}
-    cur = cur.replace(
-      new RegExp(`\\{(${B}):\\s*(${B})\\s+for\\s+([\\w, ()]+?)\\s+in\\s+(${B})(?:\\s+if\\s+(${B}))?\\}`),
-      (_m, k: string, v: string, vars: string, iter: string, cond?: string) => {
-        const p = lambdaParams(vars);
-        let out = streamOf(iter.trim());
-        if (cond) out += `.filter(${p} -> ${cond.trim()})`;
-        return `${out}.collect(Collectors.toMap(${p} -> ${k.trim()}, ${p} -> ${v.trim()}))`;
-      },
-    );
-    // set comprehension
-    cur = cur.replace(
-      new RegExp(`\\{((?:[^{}:]|\\{[^{}]*\\})+?)\\s+for\\s+([\\w, ()]+?)\\s+in\\s+(${B})(?:\\s+if\\s+(${B}))?\\}`),
-      (_m, e: string, vars: string, iter: string, cond?: string) => build(e, vars, iter, cond, '.collect(Collectors.toSet())'),
-    );
-    // list comprehension
-    cur = cur.replace(
-      new RegExp(`\\[(${L})\\s+for\\s+([\\w, ()]+?)\\s+in\\s+(${L})(?:\\s+if\\s+(${L}))?\\]`),
-      (_m, e: string, vars: string, iter: string, cond?: string) => build(e, vars, iter, cond, '.toList()'),
-    );
-    // generator expression (also covers sum(x for x in xs))
-    cur = cur.replace(
-      new RegExp(`\\((${G})\\s+for\\s+([\\w, ()]+?)\\s+in\\s+(${G})(?:\\s+if\\s+(${G}))?\\)`),
-      (_m, e: string, vars: string, iter: string, cond?: string) => `(${build(e, vars, iter, cond, '')})`,
-    );
+/** `elem for t in it if c for u in it2` -> its element and clauses, or undefined when it is not one. */
+function parseComprehension(inner: string): { elem: string; clauses: CompClause[] } | undefined {
+  if (!/\sfor\s/.test(inner)) return undefined;
+  let at = keywordAtDepth0(inner, 'for');
+  if (at < 0) return undefined;
+  const elem = inner.slice(0, at).trim().replace(/\s+async$/, '');
+  const clauses: CompClause[] = [];
+  while (at >= 0) {
+    const targetsFrom = at + 5;
+    const inAt = keywordAtDepth0(inner, 'in', targetsFrom);
+    if (inAt < 0) return undefined;
+    const nextBoundary = (from: number) => {
+      const f = keywordAtDepth0(inner, 'for', from);
+      const i = keywordAtDepth0(inner, 'if', from);
+      return f < 0 ? i : i < 0 ? f : Math.min(f, i);
+    };
+    let b = nextBoundary(inAt + 4);
+    const clause: CompClause = { targets: inner.slice(targetsFrom, inAt).trim(), iter: inner.slice(inAt + 4, b < 0 ? undefined : b).trim(), conds: [] };
+    while (b >= 0 && inner.startsWith('if', b + 1)) {
+      const next = nextBoundary(b + 4);
+      clause.conds.push(inner.slice(b + 4, next < 0 ? undefined : next).trim());
+      b = next;
+    }
+    if (!elem || !clause.targets || !clause.iter || clause.conds.some((c) => !c)) return undefined;
+    clauses.push(clause);
+    at = b;
   }
-  return cur;
+  return { elem, clauses };
+}
+
+/** The names bound by a comprehension target, as `name -> Java read of it from param`. */
+function targetReads(targets: string, param: string, entries: boolean): Map<string, string> {
+  const reads = new Map<string, string>();
+  const walk = (text: string, base: string, isEntry: boolean) => {
+    let t = text.trim();
+    if (/^[(\[]/.test(t) && groupEnd(t, 0) === t.length) t = t.slice(1, -1);
+    const parts = splitTopLevel(t).map((x) => x.trim()).filter(Boolean);
+    parts.forEach((part, k) => {
+      const read = isEntry && parts.length === 2 ? `${base}.${k === 0 ? 'getKey' : 'getValue'}()` : `${base}.get(${k})`;
+      if (/^\w+$/.test(part)) reads.set(part, read);
+      else walk(part, read, false);
+    });
+  };
+  walk(targets, param, entries);
+  return reads;
+}
+
+/**
+ * One comprehension clause chain as a stream: each clause filters by its conditions; every
+ * clause but the last flat-maps into the next, and the last maps to the element. A tuple
+ * target becomes one parameter (`item`) whose parts are read where the names were used.
+ */
+function comprehensionStream(clauses: CompClause[], elem: string, used: string, toEntry: boolean): string {
+  const [first, ...rest] = clauses;
+  let param = first.targets.replace(/^\((\w+)\)$/, '$1');
+  let rename = (x: string) => x;
+  if (!/^\w+$/.test(param)) {
+    param = 'item';
+    for (let n = 2; new RegExp(`\\b${param}\\b`).test(used); n += 1) param = `item${n}`;
+    const reads = targetReads(first.targets, param, /\.items\(\)$/.test(first.iter));
+    rename = (x: string) => x.replace(/(?<![\w.\x01])([A-Za-z_]\w*)(?![\w\x01]|\s*=(?!=))/g, (m, name: string) => reads.get(name) ?? m);
+  }
+  let out = streamOf(first.iter);
+  for (const c of first.conds) out += `.filter(${param} -> ${rename(c)})`;
+  if (rest.length) {
+    const inner = rest.map((c) => ({ ...c, iter: rename(c.iter), conds: c.conds.map(rename) }));
+    return `${out}.flatMap(${param} -> ${comprehensionStream(inner, rename(elem), used + param, toEntry)})`;
+  }
+  const e = rename(elem);
+  if (toEntry) {
+    const colon = indexAtDepth0(e, /:/);
+    return `${out}.map(${param} -> Map.entry(${e.slice(0, colon).trim()}, ${e.slice(colon + 1).trim()}))`;
+  }
+  return e === param ? out : `${out}.map(${param} -> ${e})`;
+}
+
+/** A list/set/dict comprehension or generator expression (the inside of `kind` brackets) as a stream, or undefined. */
+function comprehension(inner: string, kind: string): string | undefined {
+  const comp = parseComprehension(inner);
+  if (!comp) return undefined;
+  const { elem, clauses } = comp;
+  if (kind === '[') return `${comprehensionStream(clauses, elem, inner, false)}.toList()`;
+  if (kind === '(') return `(${comprehensionStream(clauses, elem, inner, false)})`;
+  if (indexAtDepth0(elem, /:/) < 0) return `${comprehensionStream(clauses, elem, inner, false)}.collect(Collectors.toSet())`;
+  // A dict: one clause maps straight into toMap; more go through entries.
+  if (clauses.length === 1 && /^\(?\w+\)?$/.test(clauses[0].targets)) {
+    const p = clauses[0].targets.replace(/[()]/g, '');
+    let out = streamOf(clauses[0].iter);
+    for (const c of clauses[0].conds) out += `.filter(${p} -> ${c})`;
+    const colon = indexAtDepth0(elem, /:/);
+    return `${out}.collect(Collectors.toMap(${p} -> ${elem.slice(0, colon).trim()}, ${p} -> ${elem.slice(colon + 1).trim()}))`;
+  }
+  return `${comprehensionStream(clauses, elem, inner, true)}.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue))`;
+}
+
+/**
+ * Rewrites list/set/dict comprehensions and generator expressions into stream pipelines,
+ * innermost first, at any nesting depth:
+ *
+ *   [p.name for p in ps if p.active]   -> ps.stream().filter(p -> p.active).map(p -> p.name).toList()
+ *   [v for (k, v) in d.items()]        -> d.items().stream().map(item -> item.getValue()).toList()
+ *   [x * y for x in xs for y in ys]    -> xs.stream().flatMap(x -> ys.stream().map(y -> x * y)).toList()
+ */
+function rewriteComprehensions(text: string): string {
+  // Every comprehension has ` for `; most expressions are done here.
+  if (!/\sfor\s/.test(text)) return text;
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch !== '(' && ch !== '[' && ch !== '{') {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    const end = groupEnd(text, i);
+    if (end < 0) {
+      out += text.slice(i);
+      break;
+    }
+    const inner = rewriteComprehensions(text.slice(i + 1, end - 1));
+    out += comprehension(inner, ch) ?? `${ch}${inner}${text[end - 1]}`;
+    i = end;
+  }
+  return out;
 }
 
 /** `A if C else B` -> `C ? A : B` (one expression, top level). */
@@ -457,6 +675,32 @@ function rewriteTernary(text: string): string {
  * Handles `[` ... `]` occurrences: literals become List.of / new ArrayList, subscripts
  * become .get(i) / .subList(a, b).
  */
+/** Builtin names that read as types inside `X[...]`. */
+const TYPE_ARG_NAMES = /^(?:int|float|str|bytes|bool|complex|object|list|dict|set|tuple|type|None|Any|\.\.\.)$/;
+
+/**
+ * Whether the inside of `Name[...]` reads as type arguments (`str, List<int>`, `typing.Any`,
+ * `[int], str`) rather than an index (`0`, `dt.month`, `i + 1`): every item is a name whose
+ * last part is capitalized or a builtin type, optionally with type arguments of its own.
+ */
+function looksLikeTypeArgs(receiver: string, inner: string): boolean {
+  if (/^(?:Literal|Annotated)$/.test(receiver)) return true;
+  const items = splitTopLevel(inner).map((s) => s.trim());
+  return items.length > 0 && items.every((item) => {
+    if (/^(?:List\.of\(.*\)|new ArrayList<>\(\))$/.test(item)) return true; // Callable[[A, B], R]
+    const m = /^([\w.]+|\.\.\.)\s*(?:<.*>)?$/.exec(item);
+    if (!m) return false;
+    return TYPE_ARG_NAMES.test(m[1]) || /^[A-Z]/.test(m[1].split('.').pop()!);
+  });
+}
+
+/** A slice bound on `recv`: Python counts a negative bound from the end (`-2` -> `xs.size() - 2`). */
+export function sliceBound(recv: string, bound: string, dflt: string): string {
+  if (bound === '') return dflt;
+  const neg = /^-\s*(\w+|\(.*\))$/.exec(bound);
+  return neg ? `${recv}.size() - ${neg[1]}` : bound;
+}
+
 function rewriteBrackets(text: string): string {
   let out = '';
   let i = 0;
@@ -483,7 +727,9 @@ function rewriteBrackets(text: string): string {
     }
     const inner = rewriteBrackets(text.slice(i + 1, j));
     const prevChar = out.replace(/\s+$/, '').slice(-1);
-    const isSubscript = /[\w)\]"]/.test(prevChar) || /\x01$/.test(out.replace(/\s+$/, ''));
+    // `x in [a, b]`, `return [a]`: a keyword before `[` starts a list, it is not a subscripted name.
+    const afterKeyword = /(?:^|[^\w.])(?:in|not|and|or|is|if|else|return|yield|lambda|await|assert|del|from)\s*$/.test(out);
+    const isSubscript = !afterKeyword && (/[\w)\]}"]/.test(prevChar) || /\x01$/.test(out.replace(/\s+$/, '')));
     if (!isSubscript) {
       const items = splitTopLevel(inner).filter(Boolean);
       out += items.length === 0 ? 'new ArrayList<>()' : `List.of(${items.join(', ')})`;
@@ -491,27 +737,33 @@ function rewriteBrackets(text: string): string {
       // Type hints such as List[int] look like subscripts on capitalized names - leave them alone.
       const receiverMatch = /([\w.]+|\))\s*$/.exec(out);
       const receiver = receiverMatch ? receiverMatch[1] : '';
-      if (/^[A-Z]\w*$/.test(receiver) && /^(list|dict|set|tuple|type)$/i.test(receiver) === false && /^[A-Z]/.test(receiver)) {
+      if (/^[A-Z]\w*$/.test(receiver) && /[a-z]/.test(receiver) && !/^(list|dict|set|tuple|type)$/i.test(receiver) && looksLikeTypeArgs(receiver, inner)) {
         out += `<${inner}>`;
-      } else if (inner.includes(':')) {
-        const [a, b, step] = splitTopLevel(inner, ':').concat(['', '', '']).map((s) => s.trim());
-        const parts = inner.split(':');
-        const lo = parts[0]?.trim() ?? '';
-        const hi = parts[1]?.trim() ?? '';
+      } else if (indexAtDepth0(inner, /:/) >= 0) {
+        const [lo, hi, step] = splitTopLevel(inner, ':').concat(['', '', '']).map((x) => x.trim());
         if (step === '-1' && lo === '' && hi === '') {
           out += `.reversed()`;
+        } else if (/^[\w.]+$/.test(receiver) && !step) {
+          // A plain name: subList, with Python's negative bounds counted from the end.
+          if (lo === '' && hi === '') out = `${out.slice(0, out.length - receiver.length)}new ArrayList<>(${receiver})`;
+          else out += `.subList(${sliceBound(receiver, lo, '0')}, ${sliceBound(receiver, hi, `${receiver}.size()`)})`;
         } else {
-          const recv = receiver || 'seq';
-          // Python counts negative bounds from the end: xs[-2:] -> subList(xs.size() - 2, xs.size()).
-          const bound = (v: string, dflt: string) => (v === '' ? dflt : /^-\d+$/.test(v) ? `${recv}.size() - ${v.slice(1)}` : v);
-          out += `.subList(${bound(lo, '0')}, ${bound(hi, `${recv}.size()`)})`;
-          void a;
-          void b;
+          // A call or subscript (evaluated once), or a step: the runtime helper, which also clamps.
+          const trimmed = out.replace(/\s+$/, '');
+          const start = postfixStart(trimmed, trimmed.length);
+          const recv = trimmed.slice(start);
+          const args = [lo || 'null', hi || 'null', ...(step ? [step] : [])];
+          out = `${trimmed.slice(0, start)}Py.slice(${recv}, ${args.join(', ')})`;
         }
       } else if (/^-\d+$/.test(inner.trim())) {
-        const recv = receiver || 'seq';
         const n = inner.trim().slice(1);
-        out += n === '1' ? `.get(${recv}.size() - 1)` : `.get(${recv}.size() - ${n})`;
+        if (/^[\w.]+$/.test(receiver)) out += `.get(${receiver}.size() - ${n})`;
+        else if (n === '1') out += '.getLast()';
+        else {
+          const trimmed = out.replace(/\s+$/, '');
+          const start = postfixStart(trimmed, trimmed.length);
+          out = `${trimmed.slice(0, start)}Py.at(${trimmed.slice(start)}, -${n})`;
+        }
       } else {
         out += `.get(${inner})`;
       }
@@ -560,7 +812,10 @@ const KEYWORD_RULES: Array<[RegExp, string]> = [
   [/\s*:=\s*/g, ' = /* walrus */ '],
 ];
 
-const BUILTIN_RULES: Array<[RegExp, string]> = [
+const BUILTIN_TYPE_CLASSES: Record<string, string> = { int: 'Integer', float: 'Double', str: 'String', bool: 'Boolean', bytes: 'byte[]', object: 'Object' };
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const BUILTIN_RULES: Array<[RegExp, string | ((...args: any[]) => string)]> = [
   [/\bprint\(/g, 'System.out.println('],
   [/\bstr\(/g, 'String.valueOf('],
   [new RegExp(`\\bint\\((?=${PLACEHOLDER_RE})`, 'g'), 'Integer.parseInt('],
@@ -570,10 +825,14 @@ const BUILTIN_RULES: Array<[RegExp, string]> = [
   [/\bbool\(/g, 'Boolean.valueOf('],
   [/\bsuper\(\)\.__init__\(/g, 'super('],
   [/\bsuper\(\)\./g, 'super.'],
-  [/\bsuper\(\w+,\s*this\)\./g, 'super.'],
+  [/\bsuper\([\w.]+,\s*\w+\)\./g, 'super.'],
   [/\babs\(/g, 'Math.abs('],
+  // A builtin type used as a value (`d[int] = f`, `x in (int, float)`) is its Java class;
+  // `(int)` alone is a cast made above and `int.from_bytes` an attribute.
+  [/(?<![\w.])(int|float|str|bool|bytes|object)\b(?![\w.(]|\s*=(?!=))/g, (m: string, name: string, at: number, whole: string) =>
+    whole[at - 1] === '(' && whole[at + m.length] === ')' ? m : `${BUILTIN_TYPE_CLASSES[name]}.class`],
   [new RegExp(`(${PLACEHOLDER_RE})\\s*\\*\\s*(${S})`, 'g'), '$1.repeat($2)'],
-  [/\btype\((\w+)\)/g, '$1.getClass()'],
+  [/\btype\(([\w.]+)\)/g, '$1.getClass()'],
   [/\.__class__\.__name__/g, '.getClass().getSimpleName()'],
   [/\.__class__/g, '.getClass()'],
   [/\.__name__/g, '.getName()'],
@@ -595,24 +854,45 @@ const BUILTIN_RULES: Array<[RegExp, string]> = [
   [/\.copy\(\)/g, '.copy() /* shallow copy */'],
   [new RegExp(`(${PLACEHOLDER_RE})\\.join\\(`, 'g'), 'String.join($1, '],
   [new RegExp(`(${PLACEHOLDER_RE})\\.format\\(`, 'g'), 'String.format($1, '],
-  [new RegExp(`(${PLACEHOLDER_RE})\\s*%\\s*\\(`, 'g'), 'String.format($1, '],
-  [new RegExp(`(${PLACEHOLDER_RE})\\s*%\\s*(${S})`, 'g'), 'String.format($1, $2)'],
 ];
+
+/**
+ * Python's `%` string formatting: `"%s=%d" % (k, v)` / `fmt % (k, v)` -> `String.format(fmt, k, v)`
+ * and `"%s" % f(x)` -> `String.format("%s", f(x))`. A string literal on the left, or a tuple on
+ * the right (a number cannot be taken modulo a tuple), marks it as formatting.
+ */
+function rewritePercentFormat(text: string): string {
+  return rewriteInfix(text, /\s*%(?!=)\s*/g, (left, right) => {
+    const items = tupleItems(right);
+    if (items) return `String.format(${left}, ${items.join(', ')})`;
+    if (!new RegExp(`^${PLACEHOLDER_RE}$`).test(left)) return undefined;
+    return `String.format(${left}, ${right})`;
+  });
+}
 
 function rewriteOperators(text: string): string {
   let t = text;
-  // power and floor division on simple operands
-  t = t.replace(new RegExp(`(${S})\\s*\\*\\*\\s*(${S})`, 'g'), 'Math.pow($1, $2)');
-  t = t.replace(new RegExp(`(${S})\\s*//\\s*(${S})`, 'g'), 'Math.floorDiv($1, $2)');
+  // power and floor division
+  if (t.includes('**')) t = rewriteInfix(t, /\s*\*\*\s*/g, (a, b) => `Math.pow(${a}, ${b})`);
+  if (t.includes('//')) t = rewriteInfix(t, /\s*\/\/\s*/g, (a, b) => `Math.floorDiv(${a}, ${b})`);
   // Whatever is left of `//` must not survive - it would start a Java comment.
   t = t.replace(/\/\//g, '/ /* floor div */');
   t = t.replace(/\*\*(\w)/g, '/* ** */ $1');
   // membership tests: `x in (a, b)` -> List.of(a, b).contains(x); `x in y` -> y.contains(x)
-  t = t.replace(new RegExp(`(${S})\\s+not\\s+in\\s+\\(([^()]*)\\)`, 'g'), '!List.of($2).contains($1)');
-  t = t.replace(new RegExp(`(${S})\\s+in\\s+\\(([^()]*)\\)`, 'g'), 'List.of($2).contains($1)');
-  t = t.replace(new RegExp(`(${S})\\s+not\\s+in\\s+(${S})`, 'g'), '!$2.contains($1)');
-  t = t.replace(new RegExp(`(${S})\\s+in\\s+(${S})`, 'g'), '$2.contains($1)');
+  if (/\sin\s/.test(t)) {
+    t = rewriteInfix(t, /\s+(not\s+)?in\s+/g, (x, coll, m) => {
+      const items = tupleItems(coll);
+      const target = items ? `List.of(${items.join(', ')})` : coll;
+      return `${m[1] ? '!' : ''}${target}.contains(${x})`;
+    });
+  }
   return t;
+}
+
+function lambdaParams(vars: string): string {
+  const parts = splitTopLevel(vars).map((v) => v.trim()).filter(Boolean);
+  if (parts.length === 1 && /^\w+$/.test(parts[0])) return parts[0];
+  return `(${parts.join(', ')})`;
 }
 
 function rewriteLambda(text: string): string {
@@ -644,6 +924,7 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   t = rewriteBraces(t);
   if (ctx.valueContext) t = rewriteOrFallback(t);
   for (const [re, rep] of KEYWORD_RULES) t = t.replace(re, rep);
+  if (t.includes('%')) t = rewritePercentFormat(t);
   if (ctx.className) t = t.replace(/\bcls\b/g, ctx.className);
   const literals = ctx.literals;
   t = rewriteBuiltinCalls(t, {
@@ -652,7 +933,7 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
       return idx >= 0 ? literals?.[idx] : undefined;
     },
   });
-  for (const [re, rep] of BUILTIN_RULES) t = t.replace(re, rep);
+  for (const [re, rep] of BUILTIN_RULES) t = t.replace(re, rep as string);
   t = rewriteOperators(t);
   t = rewriteExceptionNames(t);
   // keyword arguments: f(name=value) -> f(/* name = */ value)
@@ -683,6 +964,7 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   // (`f(a, b, )`) is fine in Python and a syntax error in Java.
   t = t.replace(/(?<![\w)\]])\(([^(),]+),\s*\)/g, 'Tuple.of($1)');
   t = t.replace(/,\s*\)/g, ')');
+  if (t.includes(')(')) t = rewriteCallsOnValues(t, ctx.className);
   return t;
 }
 
