@@ -8,6 +8,7 @@
 import { PLACEHOLDER_RE, SIMPLE_OPERAND, maskStrings, setFStringExpressionHook, unmaskStrings } from './strings';
 import { splitTopLevel } from './typeHints';
 import { rewriteBuiltinCalls, rewriteOrFallback, streamOf } from './builtins';
+import { rewriteIntLiterals } from './numbers';
 
 export interface ExprContext {
   /** Enclosing class name, used to render `cls`. */
@@ -27,12 +28,25 @@ const S = SIMPLE_OPERAND;
 /** Python exception names that have a natural Java counterpart. */
 export const EXCEPTIONS: Record<string, string> = {
   ValueError: 'IllegalArgumentException',
+  TypeError: 'IllegalArgumentException',
   KeyError: 'NoSuchElementException',
+  LookupError: 'NoSuchElementException',
+  AttributeError: 'IllegalStateException',
   IndexError: 'IndexOutOfBoundsException',
   NotImplementedError: 'UnsupportedOperationException',
   RuntimeError: 'RuntimeException',
   FileNotFoundError: 'FileNotFoundException',
   ZeroDivisionError: 'ArithmeticException',
+  ArithmeticError: 'ArithmeticException',
+  OverflowError: 'ArithmeticException',
+  RecursionError: 'StackOverflowError',
+  MemoryError: 'OutOfMemoryError',
+  UnicodeError: 'CharacterCodingException',
+  UnicodeDecodeError: 'CharacterCodingException',
+  UnicodeEncodeError: 'CharacterCodingException',
+  // Unchecked, so `except ImportError:` around an import that became a comment still compiles.
+  ImportError: 'NoClassDefFoundError',
+  ModuleNotFoundError: 'NoClassDefFoundError',
   AssertionError: 'AssertionError',
   StopIteration: 'NoSuchElementException',
   TimeoutError: 'TimeoutException',
@@ -140,6 +154,100 @@ function rewriteTernaryFlat(text: string): string {
   const b = text.slice(elseIdx + 6).trim();
   if (!a || !c || !b) return text;
   return `${c} ? ${a} : ${b}`;
+}
+
+/** Index just past the matching close bracket of the group opening at `i`, or -1. */
+function groupEnd(text: string, i: number): number {
+  const open = text[i];
+  const close = open === '(' ? ')' : open === '[' ? ']' : '}';
+  let depth = 0;
+  for (let j = i; j < text.length; j += 1) {
+    if (text[j] === open) depth += 1;
+    else if (text[j] === close) {
+      depth -= 1;
+      if (depth === 0) return j + 1;
+    }
+  }
+  return -1;
+}
+
+/** Words and punctuation that end a comparison chain at bracket depth 0. */
+const CHAIN_BOUNDARY = /(?:[,:;]|(?:and|or|not|if|else|for|in|is|lambda|return|yield|await)\b)/y;
+
+/** `a < b <= c` (one segment, no boundary inside) -> `a < b and b <= c`, else unchanged. */
+function splitComparisonChain(segment: string): string {
+  const ops: Array<{ at: number; op: string }> = [];
+  let depth = 0;
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    else if (depth === 0) {
+      const two = segment.slice(i, i + 2);
+      if (two === '<<' || two === '>>' || two === '->') i += 1;
+      else if (two === '<=' || two === '>=' || two === '==' || two === '!=') {
+        ops.push({ at: i, op: two });
+        i += 1;
+      } else if (ch === '<' || ch === '>') ops.push({ at: i, op: ch });
+    }
+  }
+  if (ops.length < 2) return segment;
+  const lead = /^\s*/.exec(segment)![0];
+  const trail = /\s*$/.exec(segment)![0];
+  const operands: string[] = [];
+  let from = 0;
+  for (const { at, op } of ops) {
+    operands.push(segment.slice(from, at).trim());
+    from = at + op.length;
+  }
+  operands.push(segment.slice(from).trim());
+  if (operands.some((o) => o === '')) return segment;
+  const pairs = ops.map(({ op }, k) => `${operands[k]} ${op} ${operands[k + 1]}`);
+  return `${lead}${pairs.join(' and ')}${trail}`;
+}
+
+/**
+ * Python chains comparisons, Java does not: `0 <= i < n` -> `0 <= i and i < n` (the `and`
+ * becomes `&&` later), at every bracket depth. A middle operand is repeated as written.
+ */
+function rewriteChainedComparisons(text: string): string {
+  // Cheap exit for the common case (and for 30 KB literal tables): fewer than two comparisons.
+  if ((text.match(/[<>]=?|[=!]=/g)?.length ?? 0) < 2) return text;
+  let out = '';
+  let segment = '';
+  let afterNot = false;
+  const flush = () => {
+    const chained = splitComparisonChain(segment);
+    // `not a < b < c` negates the whole chain.
+    out += chained !== segment && afterNot ? ` (${chained.trim()})${/\s*$/.exec(segment)![0]}` : chained;
+    segment = '';
+  };
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i];
+    if (ch === '(' || ch === '[' || ch === '{') {
+      const end = groupEnd(text, i);
+      if (end < 0) {
+        segment += text.slice(i);
+        break;
+      }
+      segment += ch + rewriteChainedComparisons(text.slice(i + 1, end - 1)) + text[end - 1];
+      i = end;
+      continue;
+    }
+    CHAIN_BOUNDARY.lastIndex = i;
+    const boundary = /[\w\u0001]/.test(text[i - 1] ?? '') ? null : CHAIN_BOUNDARY.exec(text);
+    if (boundary) {
+      flush();
+      out += boundary[0];
+      afterNot = boundary[0] === 'not';
+      i += boundary[0].length;
+      continue;
+    }
+    segment += ch;
+    i += 1;
+  }
+  flush();
+  return out;
 }
 
 /** Applies the ternary rewrite to every comma-separated item at every bracket depth. */
@@ -357,6 +465,8 @@ function rewriteExceptionNames(text: string): string {
 export function translateMaskedExpression(masked: string, ctx: ExprContext = {}): string {
   // Python joins adjacent string literals ("a " "b"); Java needs an explicit +.
   let t = masked.replace(new RegExp(`(${PLACEHOLDER_RE})\\s+(?=${PLACEHOLDER_RE})`, 'g'), '$1 + ');
+  t = rewriteIntLiterals(t);
+  t = rewriteChainedComparisons(t);
   t = rewriteComprehensions(t);
   t = rewriteLambda(t);
   t = rewriteTernary(t);
@@ -398,6 +508,10 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
       return renamed ? `this.${renamed}` : m;
     });
   }
+  // A one-element tuple `(x,)` is not a parenthesized `x`; any other trailing comma
+  // (`f(a, b, )`) is fine in Python and a syntax error in Java.
+  t = t.replace(/(?<![\w)\]])\(([^(),]+),\s*\)/g, 'Tuple.of($1)');
+  t = t.replace(/,\s*\)/g, ')');
   return t;
 }
 

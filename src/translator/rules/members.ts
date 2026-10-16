@@ -15,6 +15,7 @@ import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { splitTopLevel, translateType } from './typeHints';
 import { indexAtDepth0 } from './expressions';
+import { intTypeOf } from './numbers';
 import { boxIfNullable, nullableSelfFields, scanNullability } from './nullability';
 
 export interface PropertyInfo {
@@ -82,7 +83,8 @@ export interface KnownMembers {
 export function inferTypeFromMaskedValue(masked: string, literals: string[]): string {
   const v = masked.trim();
   void literals;
-  if (/^-?\d+$/.test(v)) return 'int';
+  const intType = intTypeOf(v);
+  if (intType) return intType;
   if (/^-?\d*\.\d+(e-?\d+)?$/i.test(v)) return 'double';
   if (isSingleLiteral(v)) return 'String';
   if (v === 'True' || v === 'False') return 'boolean';

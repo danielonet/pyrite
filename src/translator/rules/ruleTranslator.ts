@@ -26,6 +26,7 @@ import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, rend
 import { DEFAULT_LINE_WIDTH, formatJavaLine } from './layout';
 import { codeOnly } from '../imports/javaImports';
 import { NullabilityScan, boxIfNullable, nullableType, scanNullability } from './nullability';
+import { UNDERSCORE_NAME, renameJavaReservedIdentifiers } from './javaNames';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'other';
 
@@ -175,6 +176,7 @@ class RuleTranslation {
 
   constructor(private readonly input: TranslateInput) {
     this.lines = splitLogicalLines(input.source);
+    renameJavaReservedIdentifiers(this.lines);
     this.scan = scanMembers(this.lines);
     this.localKnown = toKnownMembers(this.scan);
     this.known = input.knownMembers;
@@ -861,7 +863,8 @@ class RuleTranslation {
     }
     if ((m = /^except\s*(?:\(?([^)]*?)\)?)?\s*(?:as\s+(\w+))?\s*:$/.exec(code))) {
       const types = (m[1] ?? '').trim();
-      const names = types ? splitTopLevel(types).map((t) => mapExceptionName(t.trim())).join(' | ') : 'Exception';
+      // Two Python types can map to one Java type (ValueError, TypeError); a multi-catch may not repeat it.
+      const names = types ? [...new Set(splitTopLevel(types).map((t) => mapExceptionName(t.trim())))].join(' | ') : 'Exception';
       const variable = m[2] ?? (types ? 'ignored' : 'e');
       this.emit(`} catch (${names} ${variable}) {${comment}`, py);
       this.stack.push({ indent: line.indent, kind: 'try', catchVar: variable });
@@ -1366,7 +1369,8 @@ class RuleTranslation {
 
     if ((m = /^range\((.*)\)$/.exec(iterable.trim())) && targets.length === 1) {
       const args = splitTopLevel(m[1]).map((a) => this.expr(a));
-      const v = targets[0];
+      const v = targets[0] === UNDERSCORE_NAME ? this.unusedLoopName(line, scope) : targets[0];
+      scope?.declared?.add(v);
       let header: string;
       scope?.types?.set(v, 'int');
       if (args.length === 1) header = `for (int ${v} = 0; ${v} < ${args[0]}; ${v}++)`;
@@ -1421,6 +1425,24 @@ class RuleTranslation {
       this.emit(`for (var (${targets.join(', ')}) : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
     }
     this.stack.push({ indent: line.indent, kind: 'for' });
+  }
+
+  /**
+   * A counter name for `for _ in range(n)` (`_` is renamed `unused`): `i`, `j`, `k`, ... when
+   * neither the loop body nor the enclosing scope uses it, so it cannot shadow a Java local.
+   * Keeps `unused` when the body does read `_`.
+   */
+  private unusedLoopName(line: LogicalLine, scope: Block | undefined): string {
+    const at = this.lines.indexOf(line);
+    const words = new Set<string>();
+    for (const l of at >= 0 ? this.bodyLines(at) : []) {
+      // A nested `for _ in ...` binds `_` again; that is not a read of this loop's `_`.
+      const code = maskStrings(l.text).text.replace(new RegExp(`^for\\s+${UNDERSCORE_NAME}\\s+in\\b`), 'for in');
+      for (const w of code.match(/\w+/g) ?? []) words.add(w);
+    }
+    if (words.has(UNDERSCORE_NAME)) return UNDERSCORE_NAME;
+    const taken = (n: string) => words.has(n) || scope?.declared?.has(n) || scope?.types?.has(n);
+    return ['i', 'j', 'k', 'n', 'm'].find((n) => !taken(n)) ?? UNDERSCORE_NAME;
   }
 
   // ------------------------------------------------------------------- with

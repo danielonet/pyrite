@@ -8,6 +8,21 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **First steps towards compilable Java** (M1 quick wins of
+  `architecture/compilable-java-plan.md`):
+  - Python names that are Java reserved words are renamed consistently
+    (`new` -> `new_`, `default` -> `default_`, `_` -> `unused`); module
+    paths in imports keep their names. `for _ in range(n)` gets a free
+    counter name (`i`, `j`, ...).
+  - Chained comparisons become `&&` chains: `0 <= i < n` ->
+    `0 <= i && i < n`.
+  - Integer literals are sized: `3000000000L`, `0xFFFFFFFFFFFFFFFFL`,
+    `new BigInteger("...")` beyond 64 bits; literal powers are folded
+    (`2**10` -> `1024`); `0o17` is written in decimal.
+  - A trailing comma in a call is dropped; `(x,)` becomes `Tuple.of(x)`.
+  - More exceptions are mapped (`TypeError`, `AttributeError`,
+    `LookupError`, `UnicodeDecodeError`, `ImportError`, `OverflowError`,
+    ...), and a multi-catch never lists the same Java type twice.
 - **Nullable primitives are boxed.** A Java primitive cannot hold `null`, so a
   value the Python code may set to `None` is declared with its wrapper type
   (`int` -> `Integer`, `float` -> `Double`, `bool` -> `Boolean`):

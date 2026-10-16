@@ -1222,7 +1222,7 @@ class Job:
     ].join('\n'),
   );
   // A signature that fits stays on one line.
-  contains(out, '        public int short(int a, int b) {');
+  contains(out, '        public int short_(int a, int b) {');
   assert.ok(maxLineLength(out) <= 120);
   // Go to Definition and the source map still point at the declaration.
   const lines = out.split('\n');
@@ -1445,7 +1445,7 @@ def scan(limit: int, flag: bool) -> float:
     total: int = None
     return 1.0
 `);
-  contains(out, 'public static Integer /* nullable */ find(String key, Integer /* nullable */ default /* = null */)');
+  contains(out, 'public static Integer /* nullable */ find(String key, Integer /* nullable */ default_ /* = null */)');
   contains(out, 'public static double scan(Integer /* nullable */ limit, boolean flag)');
   contains(out, 'Integer /* nullable */ found = null;');
   contains(out, 'Integer /* nullable */ n = 0;');
@@ -1487,4 +1487,116 @@ def outer() -> int:
 `);
   contains(out, 'public static int outer()');
   contains(out, 'int n = 1;');
+});
+
+test('compilable 1.7: a trailing comma in a call is dropped, a one-element tuple stays a tuple', () => {
+  const out = java(`
+def f(a, b):
+    g(a, b, )
+    t = (a,)
+`);
+  contains(out, 'g(a, b);');
+  contains(out, 'Tuple t = Tuple.of(a);');
+});
+
+test('compilable 1.8: Python names that are Java reserved words are renamed everywhere', () => {
+  const out = java(`
+import enum
+from dataclasses import dataclass, field
+
+@dataclass
+class Item:
+    count: int = field(default=3)
+
+def short(new, char="x"):
+    default = new + 1
+    abstract = default
+    return abstract
+
+class Color(enum.Enum):
+    RED = enum.auto()
+`);
+  contains(out, 'public static Object short_(Object new_, String char_ /* = "x" */)');
+  contains(out, 'var default_ = new_ + 1;');
+  contains(out, 'return abstract_;');
+  // keyword arguments the translator reads, and imported module names, are left alone
+  contains(out, 'public int count = 3;');
+  contains(out, 'import enum;');
+  contains(out, 'RED(enum.auto()),');
+});
+
+test('compilable 1.9: `_` is renamed, and `for _ in range` gets a counter name that is free', () => {
+  const out = java(`
+def f(n, pair):
+    for _ in range(n):
+        for _ in range(2):
+            work()
+    for _ in range(3):
+        print(_)
+    a, _ = pair
+    match n:
+        case _:
+            pass
+`);
+  contains(out, 'for (int i = 0; i < n; i++) {');
+  contains(out, 'for (int j = 0; j < 2; j++) {');
+  contains(out, 'for (int unused = 0; unused < 3; unused++) {');
+  contains(out, 'System.out.println(unused);');
+  contains(out, '(a, unused) = pair;');
+  contains(out, 'default -> {');
+});
+
+test('compilable 1.10: chained comparisons become && chains', () => {
+  const out = java(`
+def f(a, xs, n):
+    if 0 <= a < 10:
+        pass
+    ok = not 0 < n < 10
+    pick = [x for x in xs if 1 < x <= 5]
+    s = n << 2 >> 1
+    return a < g(1) <= 3
+`);
+  contains(out, 'if (0 <= a && a < 10) {');
+  contains(out, 'var ok = !(0 < n && n < 10);');
+  contains(out, '.filter(x -> 1 < x && x <= 5)');
+  contains(out, 'var s = n << 2 >> 1;');
+  contains(out, 'return a < g(1) && g(1) <= 3;');
+});
+
+test('compilable 1.15: integer literals are sized to int, long or BigInteger; literal powers are folded', () => {
+  const out = java(`
+SMALL = 2**10
+BIG_LONG = -3000000000
+MASK = 0xFFFFFFFFFFFFFFFF
+HUGE = 18446744073709551615
+POW = 2**64
+OCT = 0o17
+`);
+  contains(out, 'public static final int SMALL = 1024;');
+  contains(out, 'public static final long BIG_LONG = -3000000000L;');
+  contains(out, 'public static final long MASK = 0xFFFFFFFFFFFFFFFFL;');
+  contains(out, 'public static final BigInteger HUGE = new BigInteger("18446744073709551615");');
+  contains(out, 'public static final BigInteger POW = new BigInteger("18446744073709551616");');
+  contains(out, 'public static final int OCT = 15;');
+});
+
+test('compilable 1.20: more Python exceptions map to Java ones, and a multi-catch never repeats a type', () => {
+  const out = java(`
+def f():
+    try:
+        work()
+    except (ValueError, TypeError) as e:
+        raise AttributeError("x") from e
+    except LookupError:
+        pass
+    except UnicodeDecodeError:
+        pass
+    except ImportError:
+        pass
+`);
+  contains(out, '} catch (IllegalArgumentException e) {');
+  contains(out, 'throw new IllegalStateException("x"); // caused by e');
+  contains(out, '} catch (NoSuchElementException ignored) {');
+  contains(out, '} catch (CharacterCodingException ignored) {');
+  contains(out, '} catch (NoClassDefFoundError ignored) {');
 });

@@ -20,6 +20,7 @@ import { mirrorProject } from '../mirror';
 import { createTranslator } from '../translator';
 import { translateWithRules } from '../translator/rules/ruleTranslator';
 import { definitions, parsePython } from '../parser/pythonParser';
+import { javaSafeName } from '../translator/rules/javaNames';
 
 const REPO = path.resolve(__dirname, '..', '..');
 const SAMPLE = path.join(REPO, 'sample-python-project');
@@ -205,7 +206,8 @@ test(`corpus: the rules engine survives real-world Python (${CORPUS[0] ?? 'no co
       for (const d of definitions(tree)) {
         if (d.kind === 'function' && RENAMED.test(d.name)) continue;
         checkedDefinitions += 1;
-        if (!names.has(`${d.kind}:${d.name}`)) missing.push(`${rel}:${d.line}: ${d.kind} ${d.name} has no symbol in the Java view`);
+        // Python names that are Java reserved words are renamed in the view (`new` -> `new_`).
+        if (!names.has(`${d.kind}:${javaSafeName(d.name)}`)) missing.push(`${rel}:${d.line}: ${d.kind} ${d.name} has no symbol in the Java view`);
       }
     } finally {
       tree.delete();
