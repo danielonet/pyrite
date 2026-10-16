@@ -8,6 +8,29 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **Star-unpacking.** `f(*xs)` -> `f(xs.toArray())`; mixed arguments
+  `f(a, *xs)` become one array built from a stream, for the varargs
+  parameter. `[*a, b]`, `{*a, b}` and `(*a, b)` concatenate streams
+  (`.toList()`, `Collectors.toSet()`, `Tuple.of(...)`). Dict merges
+  `{**d, "k": v}` were silently turned into a set; they now merge the maps in
+  order, later keys winning, into a `LinkedHashMap`. Stubs on the Python 3.12
+  standard library: 1,055 -> 823.
+- **Nested functions become lambdas.** Java has no methods inside methods, so
+  a `def` inside a function is a lambda in a local variable, typed by its
+  shape (`Runnable`, `Supplier`, `Consumer`, `Function`, `BiConsumer`,
+  `BiFunction`; three or more parameters or `*args`/`**kwargs` take one
+  `Object[]`, unpacked at the top with defaults applied). Calls to it become
+  `name.apply(...)`, `name.accept(...)`, `name.get()`, `name.run()`.
+  Decorators on nested functions are kept as comments, and a class inside a
+  function is a local class. Stubs on the Python 3.12 standard library:
+  1,393 -> 1,055.
+- **Loop-`else` and `try`-`else`.** Java has neither, so a loop with an
+  `else:` gets a `broke` flag that its own `break`s set (not those of nested
+  loops), and the else part becomes `if (!broke) { ... }`. A `try` with an
+  `else:` gets a `raised` flag that every `except` sets, and the else part runs
+  after the try as `if (!raised) { ... }`, so the excepts do not catch what it
+  raises, as in Python; with a `finally:` as well, a wrapping `try` holds the
+  finally. Stubs on the Python 3.12 standard library: 1,611 -> 1,393.
 - **Static initializer blocks.** Module- and class-level code that is not a
   declaration (calls, `del`, `obj.attr = ...`, `d[k] = v`, `X += 1`,
   `if`/`for`/`try`/`with`, reassigning a field) runs in a `static { }` block

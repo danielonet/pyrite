@@ -1731,3 +1731,136 @@ class Color(Enum):
   contains(out, 'RED(1),');
   assert.ok(!/enum Color[\s\S]*static \{/.test(out), 'no static block in the enum');
 });
+
+test('loop-else: a flag the loop sets when it breaks; nested loops keep their own breaks', () => {
+  const out = java(`
+def find(xs, target):
+    for x in xs:
+        for y in x:
+            if y: break
+        if x == target:
+            break
+    else:
+        return None
+    while cond():
+        if done(): break
+    else:
+        cleanup()
+`);
+  contains(out, '        boolean broke = false;\n        for (var x : xs) {');
+  contains(out, '                if (y /* truthy: non-null and non-empty */) {\n                    break;\n');
+  contains(out, '                broke = true;\n                break;\n            }\n        }\n        if (!broke) { // loop-else: runs when the loop did not break\n            return null;\n        }');
+  contains(out, '        boolean broke2 = false;\n        while (');
+  contains(out, '        if (!broke2) { // loop-else: runs when the loop did not break\n            cleanup();');
+});
+
+test('try-else: every except sets a flag; with a finally, a wrapping try holds it', () => {
+  const out = java(`
+def f():
+    try:
+        v = load()
+    except ValueError:
+        v = None
+    else:
+        use(v)
+    try:
+        w = load()
+    except KeyError as e:
+        log(e)
+    else:
+        use(w)
+    finally:
+        close()
+`);
+  contains(out, '        boolean raised = false;\n        try {\n            var v = load();\n        } catch (IllegalArgumentException ignored) {\n            raised = true;');
+  contains(out, '        }\n        if (!raised) { // try-else: runs when no exception was raised\n            use(v);\n        }');
+  contains(out, '        try { // try / except / else / finally\n            boolean raised2 = false;\n            try {');
+  contains(out, '            if (!raised2) { // try-else: runs when no exception was raised\n                use(w);\n            }\n        } finally {\n            close();\n        }');
+});
+
+test('nested def: a lambda typed by its shape, and calls to it use the interface method', () => {
+  const out = java(`
+def outer(a, xs):
+    def log(msg):
+        print(msg)
+    def key(o):
+        return o.x
+    def add(x, y):
+        return x + y
+    def three(p, q, r=0):
+        return p
+    def tick():
+        pass
+    log("hi")
+    tick()
+    total = add(a, 2) + three(1, 2)
+    return sorted(xs, key=key)
+`);
+  contains(out, 'Consumer<Object> log = (msg) -> { // nested function\n            System.out.println(msg);\n        };');
+  contains(out, 'Function<Object, Object> key = (o) -> { // nested function');
+  contains(out, 'BiFunction<Object, Object, Object> add = (x, y) -> { // nested function');
+  contains(out, 'Function<Object[], Object> three = (Object[] argv) -> { // nested function\n            var p = argv[0];\n            var q = argv[1];\n            var r = argv.length > 2 ? argv[2] : 0;');
+  contains(out, 'Runnable tick = () -> { // nested function');
+  contains(out, 'log.accept("hi");\n        tick.run();\n        var total = add.apply(a, 2) + three.apply(new Object[] {1, 2});');
+  contains(out, 'Comparator.comparing(key)');
+});
+
+test('nested def: *args / **kwargs wrappers and decorators; a class in a function is a local class', () => {
+  const out = java(`
+def deco(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        return f(args)
+    return wrapper
+
+def g():
+    class Local:
+        pass
+    return Local()
+`);
+  contains(out, '        // @wraps(f)\n        Function<Object[], Object> wrapper = (Object[] argv) -> { // nested function');
+  contains(out, 'var args = Arrays.copyOfRange(argv, 0, argv.length); // *args');
+  contains(out, 'Map<String, Object> kwargs = new HashMap<>(); // **kwargs: Java has no keyword arguments');
+  contains(out, '        };\n        return wrapper;');
+  contains(out, '        class Local {');
+});
+
+test('star-unpacking: calls pass one array, literals concatenate streams', () => {
+  const out = java(`
+def f(xs, ys, a, b):
+    g(*xs)
+    g(a, *xs, b)
+    g(*xs, key=1)
+    t = (*xs, a)
+    l = [*xs, *ys, a]
+    s = {*xs, "x"}
+`);
+  contains(out, 'g(xs.toArray());');
+  contains(out, 'g(Stream.of(Stream.of(a), xs.stream(), Stream.of(b)).flatMap(Function.identity()).toArray());');
+  contains(out, 'g(xs.toArray(), /* key = */ 1);');
+  contains(out, 'Tuple t = Tuple.of(Stream.of(xs.stream(), Stream.of(a)).flatMap(Function.identity()).toArray());');
+  contains(out, 'List<Object> l = Stream.of(xs.stream(), ys.stream(), Stream.of(a)).flatMap(Function.identity()).toList();');
+  contains(out, 'Set<Object> s = Stream.of(xs.stream(), Stream.of("x")).flatMap(Function.identity()).collect(Collectors.toSet());');
+});
+
+test('star-unpacking: dict merges keep every map, later keys win', () => {
+  const out = translateWithRules({ source: `
+def f(d, kw):
+    m = {**d, "k": 1}
+    n = {**d, **kw}
+`, relativePath: 'pkg/mod.py', lineWidth: 0 }).java;
+  contains(out, 'Map<String, Object> m = Stream.of(d, Map.of("k", 1)).map(Map::entrySet).flatMap(Set::stream).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (older, newer) -> newer, LinkedHashMap::new));');
+  contains(out, 'Map<String, Object> n = Stream.of(d, kw).map(Map::entrySet)');
+});
+
+test('star-unpacking: a nested *args function takes the array as it is', () => {
+  const out = java(`
+def deco(f):
+    def wrapper(*args):
+        return f(args)
+    def call(*args):
+        return wrapper(*args)
+    return call
+`);
+  contains(out, 'return wrapper.apply(args.toArray());');
+});

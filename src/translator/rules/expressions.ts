@@ -21,6 +21,39 @@ export interface ExprContext {
   propertyAccessor?: (name: string) => string | undefined;
   /** `this.<python field>` -> `this.<java field>` for backing fields renamed after their property. */
   fieldRenames?: Map<string, string>;
+  /** Nested functions in scope, rendered as lambdas: calls become `name.apply(...)` and the like. */
+  localFunctions?: Map<string, LocalFunction>;
+}
+
+/** How a nested function, translated to a lambda, is called. */
+export interface LocalFunction {
+  /** Functional-interface method: `apply`, `accept`, `get`, `run`. */
+  method: string;
+  /** The lambda takes one `Object[]` (three or more parameters, or `*args`). */
+  arrayArgs: boolean;
+}
+
+/** `f(a, b)` -> `f.apply(a, b)` (or `f.apply(new Object[] {a, b, c})`) for nested functions. */
+function rewriteLocalFunctionCalls(text: string, functions: Map<string, LocalFunction>): string {
+  let t = text;
+  for (const [name, fn] of functions) {
+    const call = new RegExp(`(?<![\\w.])${name}\\(`, 'g');
+    let out = '';
+    let from = 0;
+    for (let m = call.exec(t); m; m = call.exec(t)) {
+      const open = m.index + name.length;
+      const end = groupEnd(t, open);
+      if (end < 0) break;
+      const args = t.slice(open + 1, end - 1);
+      // `f(*args)` is already an array (`args.toArray()`); anything else is packed into one.
+      const packed = fn.arrayArgs && !(splitTopLevel(args).length === 1 && /\.toArray\(\)$/.test(args.trim()));
+      out += `${t.slice(from, m.index)}${name}.${fn.method}(${packed ? `new Object[] {${args}}` : args})`;
+      from = end;
+      call.lastIndex = end;
+    }
+    t = out + t.slice(from);
+  }
+  return t;
 }
 
 const S = SIMPLE_OPERAND;
@@ -285,6 +318,106 @@ function rewriteTuples(text: string): string {
   return out;
 }
 
+/** `x` as a receiver: kept as is when it is a name, call or bracket group, else parenthesized. */
+function receiver(x: string): string {
+  const e = x.trim();
+  return /^[\w.]+(\([^()]*\))*$/.test(e) || (/^\(/.test(e) && groupEnd(e, 0) === e.length) ? e : `(${e})`;
+}
+
+/** The expression after `*` in a single-star item (`*xs`), or undefined. */
+function starred(item: string): string | undefined {
+  return /^\*(?!\*)\s*([\s\S]+)$/.exec(item.trim())?.[1];
+}
+
+/** Items with `*xs` among them as one stream: `Stream.of(Stream.of(a), xs.stream()).flatMap(Function.identity())`. */
+function streamOfItems(items: string[]): string {
+  const parts: string[] = [];
+  let plain: string[] = [];
+  const flush = () => {
+    if (plain.length) parts.push(`Stream.of(${plain.join(', ')})`);
+    plain = [];
+  };
+  for (const item of items) {
+    const x = starred(item);
+    if (x === undefined) plain.push(item.trim());
+    else {
+      flush();
+      parts.push(`${receiver(x)}.stream()`);
+    }
+  }
+  flush();
+  // Method references, not lambdas: a lambda parameter may not reuse a local's name.
+  return parts.length === 1 ? parts[0] : `Stream.of(${parts.join(', ')}).flatMap(Function.identity())`;
+}
+
+/**
+ * Star-unpacking, which Java has no syntax for (runs after the tuple pass):
+ *
+ *   f(*xs)             -> f(xs.toArray())
+ *   f(a, *xs)          -> f(Stream.of(Stream.of(a), xs.stream()).flatMap(Function.identity()).toArray())
+ *   [*xs, a], {*xs, a} -> the same stream .toList() / .collect(Collectors.toSet())
+ *   {**d, "k": v}      -> the maps merged in order, later keys winning (LinkedHashMap)
+ *
+ * The array goes to a varargs parameter; keyword arguments and `**kwargs` stay as they are.
+ */
+function rewriteStarUnpacking(text: string): string {
+  if (!/(^|[(\[{,]\s*)\*/.test(text)) return text;
+  let out = '';
+  for (let i = 0; i < text.length; ) {
+    const open = text[i];
+    if (open !== '(' && open !== '[' && open !== '{') {
+      out += open;
+      i += 1;
+      continue;
+    }
+    const end = groupEnd(text, i);
+    if (end < 0) {
+      out += text.slice(i);
+      break;
+    }
+    const inner = rewriteStarUnpacking(text.slice(i + 1, end - 1));
+    const items = splitTopLevel(inner);
+    const hasStar = items.some((it) => starred(it) !== undefined);
+    const hasDoubleStar = items.some((it) => /^\*\*/.test(it.trim()));
+    const before = out.replace(/\s+$/, '');
+    const afterValue = /[\w)\]\u0001]$/.test(before);
+    i = end;
+    if (open === '(' && hasStar && afterValue) {
+      // A call: the positional arguments become one array for the varargs parameter.
+      const keyword = (it: string) => /^\w+\s*=(?!=)/.test(it.trim()) || /^\*\*/.test(it.trim());
+      const positional = items.filter((it) => !keyword(it));
+      const rest = items.filter(keyword);
+      const single = positional.length === 1 ? starred(positional[0]) : undefined;
+      const array = single !== undefined ? `${receiver(single)}.toArray()` : `${streamOfItems(positional)}.toArray()`;
+      out += `(${[array, ...rest].join(', ')})`;
+    } else if (open === '[' && hasStar && !afterValue) {
+      out += `${streamOfItems(items)}.toList()`;
+    } else if (open === '{' && hasDoubleStar) {
+      // Merge in order; consecutive `k: v` entries stay a dict literal (Map.of later).
+      const maps: string[] = [];
+      let entries: string[] = [];
+      const flush = () => {
+        if (entries.length) maps.push(`{${entries.join(', ')}}`);
+        entries = [];
+      };
+      for (const it of items) {
+        const m = /^\*\*\s*([\s\S]+)$/.exec(it.trim());
+        if (m) {
+          flush();
+          maps.push(m[1]);
+        } else entries.push(it.trim());
+      }
+      flush();
+      out += `Stream.of(${maps.join(', ')}).map(Map::entrySet).flatMap(Set::stream).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (older, newer) -> newer, LinkedHashMap::new))`;
+    } else if (open === '{' && hasStar) {
+      out += `${streamOfItems(items)}.collect(Collectors.toSet())`;
+    } else {
+      out += `${open}${inner}${text[end - 1]}`;
+    }
+  }
+  return out;
+}
+
 /** Applies the ternary rewrite to every comma-separated item at every bracket depth. */
 function rewriteTernary(text: string): string {
   if (!/\sif\s/.test(text)) return text;
@@ -503,6 +636,7 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   t = rewriteIntLiterals(t);
   t = rewriteChainedComparisons(t);
   t = rewriteTuples(t);
+  t = rewriteStarUnpacking(t);
   t = rewriteComprehensions(t);
   t = rewriteLambda(t);
   t = rewriteTernary(t);
@@ -544,6 +678,7 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
       return renamed ? `this.${renamed}` : m;
     });
   }
+  if (ctx.localFunctions?.size) t = rewriteLocalFunctionCalls(t, ctx.localFunctions);
   // A one-element tuple `(x,)` is not a parenthesized `x`; any other trailing comma
   // (`f(a, b, )`) is fine in Python and a syntax error in Java.
   t = t.replace(/(?<![\w)\]])\(([^(),]+),\s*\)/g, 'Tuple.of($1)');

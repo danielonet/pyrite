@@ -19,7 +19,7 @@
 import { LogicalLine, splitLogicalLines } from './logicalLines';
 import { isSingleLiteral, maskStrings, unmaskStrings } from './strings';
 import { boxed, splitTopLevel, translateType } from './typeHints';
-import { ExprContext, indexAtDepth0, mapExceptionName, setFStringExpressionContext, translateExpression, translateMaskedExpression } from './expressions';
+import { ExprContext, LocalFunction, indexAtDepth0, mapExceptionName, setFStringExpressionContext, translateExpression, translateMaskedExpression } from './expressions';
 import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, isInitModule, moduleClassName, packageFromPath, pythonPackageParts, toPascalCase } from '../types';
 import { FieldInfo, KnownMembers, MemberScan, classNameOf, collectSelfFields, elementTypeOf, inferTypeFromMaskedValue, mapTypesOf, scanMembers, toKnownMembers, typeFromDefault } from './members';
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
@@ -50,6 +50,16 @@ interface Block {
   fields?: Set<string>;
   /** Index in the output of a `static {` block's opening line (static blocks). */
   startOut?: number;
+  /** Loop with an `else:` clause: the flag `break` sets, so the else part runs only without one. */
+  loopFlag?: string;
+  /** `try` (and its `except` blocks) with an `else:` clause: the flag every `except` sets. */
+  raisedFlag?: string;
+  /** Nested functions declared in this function scope (as lambdas), by name. */
+  localFunctions?: Map<string, LocalFunction>;
+  /** What closes the block, when not `}` (a lambda body: `};`). */
+  closer?: string;
+  /** Outer `try {` that only exists to hold a `finally` around try / except / else. */
+  finallyWrapper?: boolean;
   /** Locals this block declares (unpacked loop targets): out of scope in Java once it closes. */
   blockLocals?: string[];
   /** Name bound by `except ... as name` for this catch block. */
@@ -295,6 +305,7 @@ class RuleTranslation {
       valueContext,
       propertyAccessor: (name) => this.propertyGetter(name),
       fieldRenames: this.nearestClass()?.fieldRenames,
+      localFunctions: this.localFunctionsInScope(),
     };
   }
 
@@ -457,18 +468,29 @@ class RuleTranslation {
       const block = this.stack.pop()!;
       for (const name of block.blockLocals ?? []) this.enclosingScope()?.declared?.delete(name);
       if (continuation && block.indent === indent) {
-        this.lastClosedKind = block.kind;
+        this.lastClosed = block;
         return; // the continuation header emits "} else {" itself
       }
-      this.emit('}', 0, this.depth);
+      this.emit(block.closer ?? '}', 0, this.depth);
     }
   }
 
   private closeAll(): void {
     while (this.stack.length > 0) {
-      this.stack.pop();
-      this.emit('}', 0, this.depth);
+      const block = this.stack.pop()!;
+      this.emit(block.closer ?? '}', 0, this.depth);
     }
+  }
+
+  /** Nested functions visible here (from every enclosing function scope), or undefined. */
+  private localFunctionsInScope(): Map<string, LocalFunction> | undefined {
+    let all: Map<string, LocalFunction> | undefined;
+    for (const b of this.stack) {
+      if (!b.localFunctions?.size) continue;
+      all ??= new Map();
+      for (const [k, v] of b.localFunctions) all.set(k, v);
+    }
+    return all;
   }
 
   /** Next code line index after i (skipping blanks/comments) if it is a docstring for the block opened at i. */
@@ -880,24 +902,48 @@ class RuleTranslation {
       return;
     }
     if (/^else\s*:$/.test(code)) {
-      const prev = this.lastClosedKind;
-      const note = prev === 'for' || prev === 'while' ? ' // loop-else: runs when the loop was not broken out of' : prev === 'try' ? ' // try-else: runs when no exception was raised' : '';
-      this.emit(`} else {${note}${comment}`, py);
+      const prev = this.lastClosed;
+      if (prev?.loopFlag) {
+        // Java has no loop-else: the loop sets a flag when it breaks.
+        this.emit('}', py);
+        this.emit(`if (!${prev.loopFlag}) { // loop-else: runs when the loop did not break${comment}`, py);
+      } else if (prev?.raisedFlag) {
+        // Java has no try-else: every except sets a flag. Outside the try, so the excepts do not
+        // catch what the else part raises - as in Python.
+        this.emit('}', py);
+        this.emit(`if (!${prev.raisedFlag}) { // try-else: runs when no exception was raised${comment}`, py);
+      } else {
+        this.emit(`} else {${comment}`, py);
+      }
       this.stack.push({ indent: line.indent, kind: 'if' });
       return;
     }
     if ((m = /^while\s+(.+):$/.exec(code))) {
+      const loopFlag = this.loopElseFlag(i, py);
       this.emit(`while (${this.condition(m[1], lits)}) {${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'while' });
+      this.stack.push({ indent: line.indent, kind: 'while', loopFlag });
       return;
     }
     if ((m = /^(async\s+)?for\s+(.+?)\s+in\s+(.+):$/.exec(code))) {
+      const loopFlag = this.loopElseFlag(i, py);
       this.translateFor(line, m[2], m[3], lits, Boolean(m[1]), comment);
+      // translateFor pushes the loop's block (and may emit unpacking lines into it).
+      const loop = [...this.stack].reverse().find((b) => b.kind === 'for' && b.indent === line.indent);
+      if (loop && loopFlag) loop.loopFlag = loopFlag;
       return;
     }
     if (/^try\s*:$/.test(code)) {
+      const clauses = this.clausesAfter(i);
+      const raisedFlag = clauses.has('else') && clauses.has('except') ? this.freeLocalName('raised') : undefined;
+      if (raisedFlag && clauses.has('finally')) {
+        // try / except / else / finally: the finally needs a try of its own around all of it.
+        this.emit(`try { // try / except / else / finally${comment}`, py);
+        this.stack.push({ indent: line.indent, kind: 'try', finallyWrapper: true });
+        comment = '';
+      }
+      if (raisedFlag) this.emit(`boolean ${raisedFlag} = false;`, py);
       this.emit(`try {${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'try' });
+      this.stack.push({ indent: line.indent, kind: 'try', raisedFlag });
       return;
     }
     if ((m = /^except\s*(?:\(?([^)]*?)\)?)?\s*(?:as\s+(\w+))?\s*:$/.exec(code))) {
@@ -905,11 +951,19 @@ class RuleTranslation {
       // Two Python types can map to one Java type (ValueError, TypeError); a multi-catch may not repeat it.
       const names = types ? [...new Set(splitTopLevel(types).map((t) => mapExceptionName(t.trim())))].join(' | ') : 'Exception';
       const variable = m[2] ?? (types ? 'ignored' : 'e');
+      const raisedFlag = this.lastClosed?.raisedFlag;
       this.emit(`} catch (${names} ${variable}) {${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'try', catchVar: variable });
+      this.stack.push({ indent: line.indent, kind: 'try', catchVar: variable, raisedFlag });
+      if (raisedFlag) this.emit(`${raisedFlag} = true;`, py);
       return;
     }
     if (/^finally\s*:$/.test(code)) {
+      const wrapper = this.top();
+      if (wrapper?.finallyWrapper && wrapper.indent === line.indent) {
+        // Close the try-else's `if`, then the wrapper's `try` takes the finally.
+        this.emit('}', py);
+        this.stack.pop();
+      }
       this.emit(`} finally {${comment}`, py);
       this.stack.push({ indent: line.indent, kind: 'try' });
       return;
@@ -945,7 +999,8 @@ class RuleTranslation {
     }
   }
 
-  private lastClosedKind: BlockKind | undefined;
+  /** The block a continuation header (`else:`, `except:`, ...) just closed. */
+  private lastClosed: Block | undefined;
 
   /** Resolve a relative module (".models", "..repository") against this file's package. */
   private resolveModule(mod: string): string {
@@ -1031,6 +1086,9 @@ class RuleTranslation {
     } else {
       header = `public${isAbstract ? ' abstract' : ''} static class ${name}${typeParams}`;
     }
+    // A class inside a function is a local class: no access modifier, never static.
+    const scope = this.enclosingScope();
+    if (scope && scope.kind !== 'class') header = header.replace(/^public\s+/, '').replace(/\bstatic\s+class\b/, 'class');
     if (realBases.length) {
       const [first, ...rest] = realBases.map((b) => translateType(mapExceptionName(b)));
       header += isInterface ? ` extends ${realBases.join(', ')}` : ` extends ${first}`;
@@ -1312,15 +1370,16 @@ class RuleTranslation {
       const dunderDoc = inClass ? DUNDER_METHODS[name]?.doc : undefined;
       for (const l of this.methodJavadoc(name, docLine, isCtor, cls?.className, dunderDoc, paramNames, ret, py)) this.emit(l.text, l.py);
     }
+    const enclosing = !inClass ? this.enclosingScope() : undefined;
+    if (enclosing && enclosing.kind !== 'class') {
+      // A function inside a function: Java has no nested methods, so it becomes a lambda.
+      for (const d of decorators) this.emit(`// ${d.text}`, d.py);
+      this.translateNestedDef(line, name, rawParams, ret, declared, types, nullability, enclosing, comment);
+      return;
+    }
     for (const d of otherDecorators) this.emit(this.decoratorToAnnotation(d.text), d.py);
     if (isProperty) this.emit(`@Property // Python property: read as obj.${name}, rendered as obj.${name}()`, py);
     if (isSetter) this.emit(`@Setter // Python setter: obj.${name} = value, rendered as obj.${name}(value)`, py);
-
-    const nested = !inClass && this.enclosingScope() && this.enclosingScope()!.kind !== 'class';
-    if (nested) {
-      this.emit(`// nested function ${name}() - closes over the enclosing scope`, py);
-      modifiers = modifiers.filter((mod) => mod !== 'static');
-    }
 
     const generic = typeParams.length ? `<${typeParams.join(', ')}> ` : '';
     const signature = `${modifiers.join(' ')}${modifiers.length ? ' ' : ''}${generic}${isCtor ? '' : `${ret} `}${javaName}(${params.join(', ')})`;
@@ -1340,6 +1399,58 @@ class RuleTranslation {
       this.out[this.out.length - 1].text = this.out[this.out.length - 1].text.replace(/;(\s*\/\/.*)?$/, ' {$1');
     }
     this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability });
+  }
+
+  /**
+   * A nested function as a lambda in a local variable, typed by its shape:
+   *
+   *   def key(o): return o.x       ->  Function<Object, Object> key = (o) -> { return o.x; };
+   *   def log(msg): print(msg)     ->  Consumer<Object> log = (msg) -> { ... };
+   *   def wrapper(*args, **kw):    ->  Function<Object[], Object> wrapper = (Object[] argv) -> {
+   *                                        var args = Arrays.copyOfRange(argv, 0, argv.length); ...
+   *
+   * Calls to it in the enclosing function become `key.apply(o)`, `log.accept(msg)`, ...
+   */
+  private translateNestedDef(line: LogicalLine, name: string, rawParams: string[], ret: string, declared: Set<string>, types: Map<string, string>, nullability: NullabilityScan, enclosing: Block, comment: string): void {
+    const py = line.startLine;
+    const parsed = rawParams
+      .filter((p) => p !== '*' && p !== '/')
+      .map((p) => /^(\*{0,2})(\w+)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.+))?$/.exec(p))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .map((m) => ({ star: m[1], name: m[2], def: m[4] }));
+    const plain = (t: string | undefined) => boxed((t ?? 'Object').replace(/\s*\/\*.*?\*\//g, '').trim() || 'Object');
+    const isVoid = ret === 'void';
+    const r = plain(ret);
+    const arrayArgs = parsed.length >= 3 || parsed.some((p) => p.star);
+    let iface: string;
+    let method: string;
+    if (arrayArgs) [iface, method] = isVoid ? ['Consumer<Object[]>', 'accept'] : [`Function<Object[], ${r}>`, 'apply'];
+    else if (parsed.length === 0) [iface, method] = isVoid ? ['Runnable', 'run'] : [`Supplier<${r}>`, 'get'];
+    else {
+      const ps = parsed.map((p) => plain(types.get(p.name)));
+      if (parsed.length === 1) [iface, method] = isVoid ? [`Consumer<${ps[0]}>`, 'accept'] : [`Function<${ps[0]}, ${r}>`, 'apply'];
+      else [iface, method] = isVoid ? [`BiConsumer<${ps[0]}, ${ps[1]}>`, 'accept'] : [`BiFunction<${ps[0]}, ${ps[1]}, ${r}>`, 'apply'];
+    }
+    // Registered before the body, so the enclosing function (and recursive calls) call it right.
+    enclosing.localFunctions ??= new Map();
+    enclosing.localFunctions.set(name, { method, arrayArgs });
+    enclosing.declared?.add(name);
+
+    const argv = parsed.some((p) => p.name === 'argv') ? 'argv_' : 'argv';
+    const lambdaParams = arrayArgs ? `(Object[] ${argv})` : `(${parsed.map((p) => p.name).join(', ')})`;
+    const defaults = !arrayArgs && parsed.some((p) => p.def !== undefined) ? '; defaults are not applied, callers pass every argument' : '';
+    this.emit(`${iface} ${name} = ${lambdaParams} -> { // nested function${defaults}${comment}`, py);
+    this.recordSymbol(name, 'method', py);
+    this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability, closer: '};' });
+    if (!arrayArgs) return;
+    // Unpack the argument array into the Python parameters.
+    const star = parsed.findIndex((p) => p.star === '*');
+    parsed.forEach((p, k) => {
+      if (p.star === '**') this.emit(`Map<String, Object> ${p.name} = new HashMap<>(); // **${p.name}: Java has no keyword arguments`, py);
+      else if (p.star === '*') this.emit(`var ${p.name} = Arrays.copyOfRange(${argv}, ${k}, ${argv}.length); // *${p.name}`, py);
+      else if (star >= 0 && k > star) this.emit(`var ${p.name} = ${p.def !== undefined ? this.expr(p.def) : 'null'}; // keyword-only`, py);
+      else this.emit(`var ${p.name} = ${p.def !== undefined ? `${argv}.length > ${k} ? ${argv}[${k}] : ${this.expr(p.def)}` : `${argv}[${k}]`};`, py);
+    });
   }
 
   private skipRanges: Array<[number, number]> = [];
@@ -1543,7 +1654,12 @@ class RuleTranslation {
 
     if (code === 'pass') return this.emit(`// pass${comment}`, py);
     if (code === '...') return this.emit(`// ...${comment}`, py);
-    if (code === 'break' || code === 'continue') return this.emit(`${code};${comment}`, py);
+    if (code === 'break') {
+      const loop = [...this.stack].reverse().find((b) => b.kind === 'for' || b.kind === 'while' || b.kind === 'def' || b.kind === 'main');
+      if (loop?.loopFlag) this.emit(`${loop.loopFlag} = true;`, py);
+      return this.emit(`break;${comment}`, py);
+    }
+    if (code === 'continue') return this.emit(`continue;${comment}`, py);
     if (code === 'return') return this.emit(`return;${comment}`, py);
     if ((m = /^return\s+(.+)$/.exec(code))) {
       const parts = splitTopLevel(m[1]);
@@ -1803,6 +1919,32 @@ class RuleTranslation {
     const container = this.classChain();
     const sym = [...this.symbols].reverse().find((s) => s.kind === 'field' && s.name === name && s.container.join('.') === container.join('.'));
     if (sym && this.out[sym.javaLineRaw]) this.out[sym.javaLineRaw].text = this.out[sym.javaLineRaw].text.replace(/\bstatic final\b/, 'static');
+  }
+
+  /**
+   * The continuation clauses (`except`, `else`, `finally`) that follow the body of the compound
+   * statement whose header is at `i`, at the header's indent.
+   */
+  private clausesAfter(i: number): Set<string> {
+    const header = this.lines[i];
+    const clauses = new Set<string>();
+    for (let j = i + 1; j < this.lines.length; j += 1) {
+      const l = this.lines[j];
+      if (l.kind !== 'code' || l.indent > header.indent) continue;
+      if (l.indent < header.indent) break;
+      const clause = /^(except|else|finally|elif)\b/.exec(l.text);
+      if (!clause) break;
+      clauses.add(clause[1]);
+    }
+    return clauses;
+  }
+
+  /** For a loop header at `i` with an `else:` clause: declare its `broke` flag and return the name. */
+  private loopElseFlag(i: number, py: number): string | undefined {
+    if (!this.clausesAfter(i).has('else')) return undefined;
+    const flag = this.freeLocalName('broke');
+    this.emit(`boolean ${flag} = false;`, py);
+    return flag;
   }
 
   /** `base`, or `base2`, `base3`, ... : a local name nothing in this function scope uses yet (then marked used). */

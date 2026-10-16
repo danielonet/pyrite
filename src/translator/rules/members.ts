@@ -90,7 +90,8 @@ export function inferTypeFromMaskedValue(masked: string, literals: string[]): st
   if (v === 'True' || v === 'False') return 'boolean';
   if (v === 'None') return 'Object /* nullable */';
   if (/^\[/.test(v) || /^list\(/.test(v)) return 'List<Object>';
-  if (/^\{/.test(v)) return indexAtDepth0(v.slice(1, -1), /:/) >= 0 || v === '{}' ? 'Map<String, Object>' : 'Set<Object>';
+  // `{k: v}`, `{}` and `{**a, **b}` are dicts; `{a, b}` is a set.
+  if (/^\{/.test(v)) return indexAtDepth0(v.slice(1, -1), /:/) >= 0 || v === '{}' || /^\{\s*\*\*/.test(v) ? 'Map<String, Object>' : 'Set<Object>';
   if (/^dict\(/.test(v)) return 'Map<String, Object>';
   if (/^set\(/.test(v)) return 'Set<Object>';
   if (/^\(/.test(v)) return 'Tuple';

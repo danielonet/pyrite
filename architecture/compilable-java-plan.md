@@ -126,6 +126,18 @@ try-else (199), nested `def` (158), star-unpacking (1.12), comprehensions over t
 `final`, within one file) are done: stubs 1,984 -> 1,611. Next by count: loop-else / try-else
 (212), nested `def` (166), star-unpacking (98), comprehensions (82), slices (64).
 
+Loop-else / try-else are done (flags): stubs 1,611 -> 1,393. Next by count: nested `def` (166),
+star-unpacking (98), comprehensions (81), slices (64).
+
+1.5 (nested `def` -> lambda) is done: stubs 1,393 -> 1,055. Known gaps: a lambda cannot call
+itself (recursive nested functions need a local class or a holder); a `def` inside a module-level
+`if`/`try` (91 in 24 standard-library files) becomes a lambda local to the static block, invisible
+to the rest of the module - it should become a static field. Next by count: star-unpacking (87),
+comprehensions (82), slices (64), `yield` (34).
+
+1.12 (star-unpacking) is done, and the dict-merge half of 2.3 (`{**d, ...}` was silently a set):
+stubs 1,055 -> 823. Next by count: comprehensions (75), slices (64), `yield` (33).
+
 Every item here produced a javac syntax error. Add a parse gate: run the Java output
 through a Java parser (tree-sitter-java or `javac -proc:none` on the single file). On
 failure, **degrade the offending statement** to a compile-safe stub
