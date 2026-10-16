@@ -113,7 +113,10 @@ Several rules below depend on this (keyword-argument binding, overloads, `final`
 
 **Progress (rules engine):** done: 1.7, 1.8, 1.9, 1.10, 1.15, 1.20 (each with a regression
 test in `src/test/rules.test.ts`, "compilable 1.x"). 1.14 (`*/` in docstrings) already held.
-Still open: the parse gate and the rows that need the AST front end (0.1).
+The parse gate is in place (`src/translator/parseGate.ts`): on the Python 3.12 standard library
+it takes the files that parse as Java from 14 to 157 of 167 (4,934 error rows to 32). The stubs it
+writes (`TODO(pyrite)`) are now the measurable to-do list for the rows below. Still open: the rows
+that need the AST front end (0.1).
 
 Every item here produced a javac syntax error. Add a parse gate: run the Java output
 through a Java parser (tree-sitter-java or `javac -proc:none` on the single file). On

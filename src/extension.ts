@@ -22,6 +22,7 @@ import { javaLineFor, javaPathFor, mirrorFile, projectBasePackage, pythonLineFor
 import { runMirrorInBackground } from './backgroundMirror';
 import { SymbolIndexCache, ViewStats, resolveDefinition } from './definitionIndex';
 import { PyriteAboutViewProvider } from './aboutView';
+import { InvalidJavaMode } from './translator/parseGate';
 
 let output: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
@@ -55,6 +56,7 @@ interface Settings {
   javadocTestCode: boolean;
   lombok: boolean;
   lineWidth: number;
+  invalidJava: InvalidJavaMode;
   ollamaUrl: string;
   ollamaModel: string;
   ollamaTimeoutSeconds: number;
@@ -74,6 +76,7 @@ function settings(): Settings {
     javadocTestCode: cfg.get<boolean>('javadocTestCode', false),
     lombok: cfg.get<boolean>('lombok', true),
     lineWidth: cfg.get<number>('lineWidth', 120),
+    invalidJava: cfg.get<InvalidJavaMode>('invalidJava', 'stub'),
     ollamaUrl: cfg.get<string>('ollama.url', 'http://localhost:11434'),
     ollamaModel: cfg.get<string>('ollama.model', 'qwen2.5-coder:7b'),
     ollamaTimeoutSeconds: cfg.get<number>('ollama.timeoutSeconds', 300),
@@ -159,6 +162,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
             documentTestCode: s.javadocTestCode,
             lombokStyle: s.lombok,
             lineWidth: s.lineWidth,
+            invalidJava: s.invalidJava,
           },
         },
         (rel, i, total) => {
@@ -209,7 +213,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   statusItem.show();
   try {
     const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage);
-    const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, basePackage, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth });
+    const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, basePackage, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth, invalidJava: s.invalidJava });
     symbolIndexFor(root, s.outputFolder).invalidatePython(rel, basePackage);
     void refreshStatusReport(pyUri);
     if (outcome.skipped) {

@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { basePackageFor, createTranslator, EngineName, JavadocMode, ollamaCacheFile } from './translator';
 import { DEFAULT_EXCLUDES, mirrorProject } from './mirror';
+import { InvalidJavaMode, applyParseGate } from './translator/parseGate';
 
 const JAVADOC_MODES: JavadocMode[] = ['always', 'docstringOnly', 'none'];
 
@@ -27,11 +28,12 @@ interface Args {
   javadocTestCode: boolean;
   lombok: boolean;
   lineWidth: number;
+  invalidJava: InvalidJavaMode;
   quiet: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { out: '.java-view', engine: 'rules', javaImports: true, javadoc: 'docstringOnly', javadocTestCode: false, lombok: true, lineWidth: 120, quiet: false };
+  const args: Args = { out: '.java-view', engine: 'rules', javaImports: true, javadoc: 'docstringOnly', javadocTestCode: false, lombok: true, lineWidth: 120, invalidJava: 'stub', quiet: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -66,6 +68,14 @@ function parseArgs(argv: string[]): Args {
       }
       args.lineWidth = n;
     }
+    else if (a === '--invalid-java') {
+      const value = argv[++i];
+      if (value !== 'stub' && value !== 'keep') {
+        console.error('--invalid-java must be stub or keep');
+        process.exit(2);
+      }
+      args.invalidJava = value;
+    }
     else if (a === '--quiet' || a === '-q') args.quiet = true;
     else if (a === '--help' || a === '-h') {
       printUsage();
@@ -82,14 +92,16 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--engine rules|hybrid] [--quiet]
-  pyrite --file <module.py> [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120]
+  pyrite <project-root> [--out .java-view] [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--invalid-java stub|keep] [--engine rules|hybrid] [--quiet]
+  pyrite --file <module.py> [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--invalid-java stub|keep]
 
   --out <folder>        Output folder; laid out as a Java project (src/main/java, src/test/java).
   --package <name>      Package every view starts with (default: the project folder's name).
   --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).
   --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).
   --line-width <n>      Wrap generated lines longer than n columns (default: 120, 0 = no wrapping).
+  --invalid-java keep   Leave statements that are not valid Java as they are, only report them
+                        (default: stub, replace each one with a TODO(pyrite) stub that parses).
   --engine hybrid       Also rewrite hard functions with a local Ollama model (--ollama-url, --ollama-model),
                         and replace the Python-shaped imports with real Java ones.
   --no-java-imports     With --engine hybrid: keep the rules engine's imports as they are.`);
@@ -106,7 +118,11 @@ async function main(): Promise<void> {
   if (args.file) {
     const abs = path.resolve(args.file);
     const source = fs.readFileSync(abs, 'utf8');
-    const result = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode, lombokStyle: args.lombok, lineWidth: args.lineWidth, basePackage: args.basePackage && basePackageFor(args.basePackage) });
+    const translated = await translator.translate({ source, relativePath: path.basename(abs), javadocMode: args.javadoc, documentTestCode: args.javadocTestCode, lombokStyle: args.lombok, lineWidth: args.lineWidth, basePackage: args.basePackage && basePackageFor(args.basePackage) });
+    const gate = await applyParseGate(translated, source, args.invalidJava, args.lineWidth);
+    const result = gate.result;
+    if (gate.stubbed) result.warnings.push(`${gate.stubbed} statement(s) were not valid Java and became TODO(pyrite) stubs`);
+    if (gate.remaining) result.warnings.push(`${gate.remaining} line(s) are still not valid Java`);
     process.stdout.write(result.java);
     for (const w of result.warnings) console.error(`warning: ${w}`);
     return;
@@ -130,6 +146,7 @@ async function main(): Promise<void> {
     documentTestCode: args.javadocTestCode,
     lombokStyle: args.lombok,
     lineWidth: args.lineWidth,
+    invalidJava: args.invalidJava,
     onProgress: (rel, i, total) => {
       if (!args.quiet) console.error(`[${i + 1}/${total}] ${rel}`);
     },

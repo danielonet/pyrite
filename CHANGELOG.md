@@ -8,6 +8,15 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **Parse gate.** Every Java view is parsed with tree-sitter-java. Each
+  generated statement that is not valid Java becomes a stub that parses,
+  `if (true) throw new UnsupportedOperationException("TODO(pyrite): <python>");`,
+  with the original text kept as a comment and the line count unchanged (so
+  the source map and Go to Definition stay right). An invalid block header
+  opens a plain block, so its body is kept; Python's loop-`else` and
+  try-`else` keep their bodies the same way. On the Python 3.12 standard
+  library, files that parse as Java went from 14 to 157 of 167. New setting
+  `pyrite.invalidJava` (`stub` | `keep`) and CLI flag `--invalid-java`.
 - **First steps towards compilable Java** (M1 quick wins of
   `architecture/compilable-java-plan.md`):
   - Python names that are Java reserved words are renamed consistently

@@ -22,6 +22,7 @@ import { knownMembersOf, mergeKnownMembers } from './translator/rules/members';
 import { checkSyntax } from './parser/pythonParser';
 import { splitLogicalLines } from './translator/rules/logicalLines';
 import { isSingleLiteral, maskStrings } from './translator/rules/strings';
+import { InvalidJavaMode, applyParseGate } from './translator/parseGate';
 
 export interface MirrorOptions {
   /** Absolute path of the Python project root. */
@@ -43,6 +44,8 @@ export interface MirrorOptions {
   lombokStyle?: boolean;
   /** Maximum line length of the generated Java; 0 disables wrapping (default 120). See `TranslateInput.lineWidth`. */
   lineWidth?: number;
+  /** What to do with generated statements that are not valid Java (default `stub`). See `applyParseGate`. */
+  invalidJava?: InvalidJavaMode;
   /** Package every view sits under; blank or omitted takes the root folder's name (see `projectBasePackage`). */
   basePackage?: string;
   /** Progress callback: called once per file with the relative path and index. */
@@ -279,6 +282,8 @@ export interface MirrorFileOptions {
   documentTestCode?: boolean;
   lombokStyle?: boolean;
   lineWidth?: number;
+  /** What to do with generated statements that are not valid Java (default `stub`). See `applyParseGate`. */
+  invalidJava?: InvalidJavaMode;
   /** Package every view sits under; blank or omitted takes the root folder's name (see `projectBasePackage`). */
   basePackage?: string;
   /** Project-wide declarations; when omitted, the `members.json` a previous project run left behind is used. */
@@ -349,6 +354,11 @@ export async function mirrorFile(translator: Translator, root: string, relativeP
     writeView(root, relativePython, outputFolder, basePackage, failureView(relativePython, translator.name, err, basePackage), [], [], translator.name, 'failed', [`${relativePython}: translation failed: ${err instanceof Error ? err.message : String(err)}`]);
     throw err;
   }
+  // Statements that are not valid Java become stubs that parse, so one bad line cannot break the file.
+  const gate = await applyParseGate(result, source, options.invalidJava ?? 'stub', options.lineWidth ?? 120);
+  result = gate.result;
+  if (gate.stubbed) result.warnings.push(`${relativePython}: ${gate.stubbed} statement${gate.stubbed === 1 ? ' was' : 's were'} not valid Java and became TODO(pyrite) stubs`);
+  if (gate.remaining) result.warnings.push(`${relativePython}: ${gate.remaining} line${gate.remaining === 1 ? ' is' : 's are'} still not valid Java`);
   // A file that does not even parse still gets a view (the rules engine is line-based and
   // survives), but the reader must know the view is built on broken input.
   const issues = await checkSyntax(source);
@@ -507,7 +517,7 @@ export async function mirrorProject(translator: Translator, options: MirrorOptio
     if (options.isCancelled?.()) break;
     options.onProgress?.(rel, index, files.length);
     try {
-      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, basePackage, knownMembers });
+      const outcome = await mirrorFile(translator, options.root, rel, { outputFolder, javadocMode: options.javadocMode, documentTestCode: options.documentTestCode, lombokStyle: options.lombokStyle, lineWidth: options.lineWidth, invalidJava: options.invalidJava, basePackage, knownMembers });
       if (outcome.skipped) {
         skipped += 1;
         continue;

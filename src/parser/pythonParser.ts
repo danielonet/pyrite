@@ -12,8 +12,8 @@
  * loaded, so a packaging problem never breaks translation.
  */
 
-import * as path from 'path';
 import type { Node, Parser as ParserType, Tree } from 'web-tree-sitter';
+import { loadParser } from './treeSitter';
 
 export interface SyntaxIssue {
   /** 1-based line. */
@@ -36,22 +36,7 @@ let parserPromise: Promise<ParserType | undefined> | undefined;
 
 /** The shared parser, or undefined when the runtime is unavailable. Loaded once, lazily. */
 export function pythonParser(): Promise<ParserType | undefined> {
-  if (!parserPromise) {
-    parserPromise = (async () => {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { Parser, Language } = require('web-tree-sitter') as typeof import('web-tree-sitter');
-        await Parser.init();
-        const grammar = path.join(path.dirname(require.resolve('tree-sitter-python/package.json')), 'tree-sitter-python.wasm');
-        const language = await Language.load(grammar);
-        const parser = new Parser();
-        parser.setLanguage(language);
-        return parser;
-      } catch {
-        return undefined;
-      }
-    })();
-  }
+  if (!parserPromise) parserPromise = loadParser('tree-sitter-python', 'tree-sitter-python.wasm');
   return parserPromise;
 }
 

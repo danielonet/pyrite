@@ -238,6 +238,19 @@
           "default": true,
           "description": "Use Lombok-style annotations instead of spelling out boilerplate: a class whose __init__ only assigns its parameters to fields gets @AllArgsConstructor, a trivial __str__/__repr__ becomes @ToString, a trivial __eq__/__hash__ becomes @EqualsAndHashCode, a @property/@x.setter pair that just wraps a field becomes @Getter/@Setter on that field, and a dataclass-like class (@dataclass, NamedTuple, pydantic BaseModel, ...) becomes @Data. Methods that don't match these simple shapes are left spelled out."
         },
+        "pyrite.invalidJava": {
+          "type": "string",
+          "enum": [
+            "stub",
+            "keep"
+          ],
+          "enumDescriptions": [
+            "Replace each generated statement that is not valid Java with a stub that parses: `throw new UnsupportedOperationException(\"TODO(pyrite): <python>\")`, keeping the original text as a comment.",
+            "Leave statements that are not valid Java as they are; only count them in the view's warnings."
+          ],
+          "default": "stub",
+          "markdownDescription": "What to do with generated statements that are not valid Java. Every view is parsed as Java; with **stub** (default) one bad statement can no longer break the rest of the file, and each stub names the Python line it came from (search for `TODO(pyrite)`)."
+        },
         "pyrite.lineWidth": {
           "type": "integer",
           "default": 120,
@@ -269,6 +282,7 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "tree-sitter-java": "^0.23.5",
     "tree-sitter-python": "^0.25.0",
     "web-tree-sitter": "^0.25.0"
   }

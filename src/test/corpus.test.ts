@@ -92,7 +92,9 @@ test('snapshot: the sample project translates exactly as recorded', async () => 
     fs.cpSync(SAMPLE, root, { recursive: true });
     const { translator } = createTranslator({ engine: 'rules' });
     const summary = await mirrorProject(translator, { root, lombokStyle: true });
-    assert.deepEqual(summary.warnings, []);
+    // The only statement the parse gate stubs: a Python tuple built inside a lambda. Any new
+    // stub is a regression the snapshot diff alone could hide.
+    assert.deepEqual(summary.warnings, ['main.py: 1 statement was not valid Java and became TODO(pyrite) stubs']);
     const produced: string[] = [];
     const collect = (dir: string) => {
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
