@@ -10,7 +10,19 @@ export interface OllamaConnection {
   model: string;
   /** Give up on one request after this many milliseconds. */
   timeoutMs: number;
+  /** Context window in tokens (prompt + answer). Defaults to `DEFAULT_NUM_CTX`. */
+  numCtx?: number;
+  /** Most tokens the answer may take. Defaults to `DEFAULT_NUM_PREDICT`. */
+  numPredict?: number;
 }
+
+/**
+ * Ollama's own default window is small (2-4k tokens) and it cuts a longer prompt without an
+ * error, so the system prompt, the runtime cheat-sheet and the function can be silently lost.
+ */
+export const DEFAULT_NUM_CTX = 8192;
+/** A rewritten function is about as long as the Python one; this caps a model that rambles. */
+export const DEFAULT_NUM_PREDICT = 2048;
 
 /** A failed Ollama call. `unreachable` means the server could not be contacted at all (as opposed to a bad answer). */
 export class OllamaError extends Error {
@@ -37,7 +49,7 @@ export const ollamaChat: ChatFn = async (conn, system, user) => {
         // Thinking models (qwen3, ...) are far too slow for this; the answer is a translation, not a puzzle.
         think: false,
         // Deterministic output keeps the view stable between regenerations.
-        options: { temperature: 0 },
+        options: { temperature: 0, num_ctx: conn.numCtx ?? DEFAULT_NUM_CTX, num_predict: conn.numPredict ?? DEFAULT_NUM_PREDICT },
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },

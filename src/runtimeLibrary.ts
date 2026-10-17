@@ -40,3 +40,37 @@ export function writeRuntimeLibrary(sourceRoot: string): string[] {
   }
   return written;
 }
+
+/** Classes whose every static method is listed with its signature in the cheat-sheet; the rest list names only. */
+const SIGNATURE_CLASSES = ['Py', 'Tuple'];
+
+let cheatSheet: string | undefined;
+
+/**
+ * A compact reference of the runtime library for a model prompt, built from the Java sources so
+ * it cannot drift from them: full signatures for `Py` and `Tuple`, member names for the module
+ * classes (`Re`, `Os`, ...). Empty when the sources are not found.
+ */
+export function runtimeCheatSheet(): string {
+  if (cheatSheet !== undefined) return cheatSheet;
+  const full: string[] = [];
+  const names: string[] = [];
+  for (const [file, text] of runtimeSources()) {
+    const cls = file.replace(/\.java$/, '');
+    const found: string[] = [];
+    let nested = '';
+    for (const line of text.split('\n')) {
+      if (/^ {4}}\s*$/.test(line)) nested = '';
+      const inner = /^ {4}public static final class (\w+)/.exec(line);
+      if (inner) nested = inner[1];
+      const m = /^( {4}| {8})public static ([^=]*?)\b(\w+)\((.*)\)\s*(?:throws [\w., ]+)?\s*\{\s*$/.exec(line);
+      if (!m || (m[1].length === 8) !== Boolean(nested)) continue;
+      const qualified = `${cls}.${nested ? `${nested}.` : ''}${m[3]}`;
+      if (SIGNATURE_CLASSES.includes(cls)) full.push(`${m[2].trim()} ${qualified}(${m[4]})`);
+      else found.push(`${nested ? `${nested}.` : ''}${m[3]}`);
+    }
+    if (found.length) names.push(`${cls}: ${[...new Set(found)].join(', ')}`);
+  }
+  cheatSheet = full.length || names.length ? [...full, ...names].join('\n') : '';
+  return cheatSheet;
+}

@@ -11,8 +11,10 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { IMPORTS_SYSTEM_PROMPT, JavaView, ModelImports, acceptModelImports, applyImports, askable, importsPrompt, planImports, renderImports } from '../imports/javaImports';
+import { javaErrorRows } from '../../parser/javaParser';
+import { runtimeCheatSheet } from '../../runtimeLibrary';
 import { RuleBasedTranslator } from '../rules/ruleTranslator';
-import { SymbolInfo, TranslateInput, TranslateResult, Translator } from '../types';
+import { KnownMembers, SymbolInfo, TranslateInput, TranslateResult, Translator } from '../types';
 import { findHardBlocks, PythonBlock } from './hardBlocks';
 import { ChatFn, OllamaConnection, OllamaError, ollamaChat } from './ollamaClient';
 
@@ -39,17 +41,56 @@ export const DEFAULT_OLLAMA_OPTIONS: OllamaOptions = {
 const UNREACHABLE_BACKOFF_MS = 60_000;
 const MAX_CACHE_ENTRIES = 2000;
 
-export const SYSTEM_PROMPT = `You rewrite ONE Python function as a Java-flavored *reading view* for Java developers who do not know Python.
-You are given the Python function and a draft produced by a rule-based translator. The draft is right about names, types and structure but got this function wrong or left part of it untranslated. Fix that.
+export const SYSTEM_PROMPT = `You rewrite ONE Python function as Java for Java developers who do not know Python. Aim for Java that compiles once the listed types exist.
+You are given the Python function, a draft produced by a rule-based translator, and a list of what went wrong in that draft. The draft's names and structure are mostly right; fix the listed problems and keep the rest unless it is clearly broken.
 
 Rules:
 1. Faithfulness first: keep every statement, name, string and comment. Do not summarize, reorder, drop code or add behavior.
-2. Java syntax: braces, semicolons, explicit types (infer from hints and usage; use var or Object when unknown), comments as // comments.
-3. Keep the function's name, parameters and modifiers exactly as in the draft. Output the single function only: no enclosing class, no imports.
+2. Java syntax: braces, semicolons, explicit types (take them from the class fields, the known signatures and the type hints; use var or Object only when unknown), comments as // comments.
+3. Keep the function's name, parameters and modifiers exactly as in the draft. Output the single function only: no enclosing class, no imports. The Pyrite runtime classes below are already imported.
 4. Keep snake_case identifiers as in Python. Idioms: comprehensions -> streams, f-strings -> concatenation or String.format, dict -> Map, list -> List, None -> null, raise -> throw new, with -> try-with-resources, generators -> a comment plus the closest Java form, async/await kept as comments.
-5. When something has no Java equivalent, keep it as close to Java as possible and add a short /* python: ... */ comment. Never silently drop it. The output does NOT need to compile.
+5. When Python behavior has no one-line Java equivalent (truthiness, slices, negative indexes, tuples, string methods, os, re), call the Pyrite runtime library below instead of inventing Java. Use only the members listed there; never invent a helper class or method. Only if nothing fits, keep the construct as close to Java as possible with a short /* python: ... */ comment. Never silently drop it.
 6. End every method header, class header and control-flow header line (if/for/while/try/with/else/catch) with a marker comment "// py:N" where N is the 1-based Python line number shown to the left of the code. Add no other markers.
 7. Output only the Java text, no Markdown fences and no explanations.`;
+
+/** The system prompt plus the runtime library's reference, built from its Java sources. */
+export function systemPrompt(): string {
+  const sheet = runtimeCheatSheet();
+  return sheet ? `${SYSTEM_PROMPT}\n\nPyrite runtime library (package pyrite.runtime; for a class listed by member names only, the Python names are kept, e.g. Re.sub):\n${sheet}` : SYSTEM_PROMPT;
+}
+
+/** Most known signatures listed in one request, so the prompt stays inside the context window. */
+const MAX_KNOWN_SIGNATURES = 24;
+
+/** Name of the Python class whose body holds the line `defLine`, found by indentation. */
+function enclosingClass(pyLines: string[], defLine: number): string | undefined {
+  const indentOf = (l: string) => /^\s*/.exec(l)![0].length;
+  let indent = indentOf(pyLines[defLine - 1] ?? '');
+  for (let i = defLine - 2; i >= 0 && indent > 0; i -= 1) {
+    if (!pyLines[i].trim() || indentOf(pyLines[i]) >= indent) continue;
+    indent = indentOf(pyLines[i]);
+    const m = /^\s*class\s+([A-Za-z_]\w*)/.exec(pyLines[i]);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+/** What the rest of the project says about the function's surroundings: the class's fields and the signatures it calls. */
+export function contextFor(known: KnownMembers | undefined, cls: string | undefined, functionText: string): string {
+  if (!known) return '';
+  const parts: string[] = [];
+  if (cls) {
+    const fields = Object.entries(known.fieldTypes).filter(([k]) => k.startsWith(`${cls}.`)).map(([k, t]) => `${t} ${k.slice(cls.length + 1)}`);
+    if (fields.length) parts.push(`Fields of ${cls}:\n${fields.map((f) => `  ${f}`).join('\n')}`);
+  }
+  const called = new Set([...functionText.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)].map((m) => m[1]));
+  const signatures = Object.entries(known.returnTypes)
+    .filter(([k]) => called.has(k.split('.').pop()!))
+    .slice(0, MAX_KNOWN_SIGNATURES)
+    .map(([k, t]) => `  ${t} ${k}(...)`);
+  if (signatures.length) parts.push(`Return types of project functions this code calls:\n${signatures.join('\n')}`);
+  return parts.join('\n\n');
+}
 
 interface CacheFile {
   [key: string]: string;
@@ -126,6 +167,74 @@ function locateJavaBlock(javaLines: string[], sourceMap: number[], block: Python
   return undefined;
 }
 
+/**
+ * The concrete problems the rules reported inside `block`: each warning, and each statement left
+ * `untranslated`, with the Python line it came from. Tells the model where to look.
+ */
+function problemsFor(block: PythonBlock, warnings: string[], javaLines: string[], sourceMap: number[], pyLines: string[]): string[] {
+  const out: string[] = [];
+  for (const w of warnings) {
+    const m = /:(\d+): (.*)$/.exec(w);
+    if (m && Number(m[1]) >= block.start && Number(m[1]) <= block.end) out.push(`line ${m[1]}: ${m[2]}`);
+  }
+  javaLines.forEach((l, i) => {
+    const py = sourceMap[i];
+    if (l.includes('TODO: untranslated') && py >= block.start && py <= block.end) out.push(`line ${py} was not translated: ${pyLines[py - 1].trim()}`);
+  });
+  if (out.length === 0) out.push(block.reason);
+  return [...new Set(out)].slice(0, 10);
+}
+
+/** What is wrong with a model answer, found without asking the model. */
+export interface AnswerProblems {
+  /** Lines that are not valid Java, as "answer line N: text". Empty when the answer parses (or no parser is available). */
+  syntax: string[];
+  /** Plain string literals of the Python that the answer does not contain. */
+  missingStrings: string[];
+}
+
+const MAX_REPORTED = 5;
+
+/** Plain "..." / '...' literals in the Python code (not f-strings, prefixed strings or docstrings), with their 1-based line within `pythonLines`. */
+function pythonStringLiterals(pythonLines: string[]): { text: string; line: number }[] {
+  const found: { text: string; line: number }[] = [];
+  pythonLines.forEach((l, i) => {
+    if (l.trimStart().startsWith('#') || l.includes('"""') || l.includes("'''")) return;
+    for (const m of l.matchAll(/(?<![\w"'])(["'])((?:(?!\1)[^\\\n])+)\1/g)) {
+      if (m[2].trim() && !found.some((f) => f.text === m[2])) found.push({ text: m[2], line: i + 1 });
+    }
+  });
+  return found;
+}
+
+/**
+ * Check a model answer for `block`: it must parse as a Java method, and keep every plain string
+ * literal of the Python function (rule 1 of the prompt, "keep every string").
+ */
+export async function checkAnswer(answer: string, block: PythonBlock, pyLines: string[]): Promise<AnswerProblems> {
+  const rows = await javaErrorRows(`class Wrapper {\n${answer}\n}`);
+  const answerLines = answer.split('\n');
+  const syntax = (rows ?? [])
+    .map((row) => Math.min(Math.max(row - 1, 0), answerLines.length - 1))
+    .filter((row, i, all) => all.indexOf(row) === i)
+    .slice(0, MAX_REPORTED)
+    .map((row) => `answer line ${row + 1}: ${answerLines[row].trim()}`);
+  const missingStrings = pythonStringLiterals(pyLines.slice(block.start - 1, block.end))
+    .filter((lit) => !answer.includes(lit.text))
+    .slice(0, MAX_REPORTED)
+    .map((lit) => `"${lit.text}" (Python line ${block.start + lit.line - 1})`);
+  return { syntax, missingStrings };
+}
+
+/** The follow-up message that shows the model its own answer and what is wrong with it. */
+function retryMessage(user: string, previous: string, problems: AnswerProblems): string {
+  const items = [
+    ...problems.syntax.map((p) => `not valid Java, ${p}`),
+    ...problems.missingStrings.map((p) => `the string literal ${p} is missing`),
+  ];
+  return `${user}\n\nYour previous answer:\n${previous}\n\nProblems found in it:\n${items.map((i) => `- ${i}`).join('\n')}\n\nFix these problems and output the whole function again, in the same format.`;
+}
+
 export class HybridTranslator implements Translator {
   readonly name = 'hybrid' as const;
   private readonly cache = new Map<string, string>();
@@ -194,7 +303,7 @@ export class HybridTranslator implements Translator {
       if (map.slice(a, b + 1).some((py) => py !== 0 && (py < block.start || py > block.end))) continue;
 
       try {
-        const answer = await this.rewrite(input, block, pyLines, lines.slice(a, b + 1));
+        const answer = await this.rewrite(input, block, pyLines, lines.slice(a, b + 1), warnings, problemsFor(block, base.warnings, javaLines, base.sourceMap, pyLines));
         const indent = /^\s*/.exec(lines[a])![0];
         const parsed = parseAnswer(answer, block.defLine, indent);
         const note = `${indent}// Rewritten by ${this.options.model} (${block.reason}); check against the Python.`;
@@ -254,15 +363,33 @@ export class HybridTranslator implements Translator {
   }
 
   /** The model's cleaned answer for one function, from the cache when possible. */
-  private async rewrite(input: TranslateInput, block: PythonBlock, pyLines: string[], draft: string[]): Promise<string> {
+  private async rewrite(input: TranslateInput, block: PythonBlock, pyLines: string[], draft: string[], warnings: string[], problems: string[]): Promise<string> {
     const numbered = pyLines
       .slice(block.start - 1, block.end)
       .map((l, i) => `${String(block.start + i).padStart(4)} | ${l}`)
       .join('\n');
-    const draftText = draft.join('\n');
-    const user = `File: ${input.relativePath}\nReason for rewrite: ${block.reason}\n\nPython function:\n${numbered}\n\nRule-based draft:\n${draftText}`;
+    const functionText = pyLines.slice(block.start - 1, block.end).join('\n');
+    const context = contextFor(input.knownMembers, enclosingClass(pyLines, block.defLine), functionText);
+    const wrong = problems.length ? problems.map((p) => `- ${p}`).join('\n') : `- ${block.reason}`;
+    const user =
+      `File: ${input.relativePath}\n` +
+      (context ? `\n${context}\n` : '') +
+      `\nWhat went wrong in the draft:\n${wrong}\n` +
+      `\nPython function:\n${numbered}\n\nRule-based draft:\n${draft.join('\n')}`;
 
-    return this.ask(SYSTEM_PROMPT, user, looksLikeJava);
+    const system = systemPrompt();
+    const first = await this.ask(system, user, looksLikeJava);
+    const found = await checkAnswer(first, block, pyLines);
+    if (!found.syntax.length && !found.missingStrings.length) return first;
+
+    // One retry, showing the model what is wrong with its own answer.
+    const second = await this.ask(system, retryMessage(user, first, found), looksLikeJava);
+    const left = await checkAnswer(second, block, pyLines);
+    if (left.syntax.length) throw new Error(`the model's answer still is not valid Java (${left.syntax[0]})`);
+    if (left.missingStrings.length) {
+      warnings.push(`${input.relativePath}:${block.defLine}: ${block.name}() rewritten by ${this.options.model} lacks the string literal ${left.missingStrings.join(', ')}; check against the Python`);
+    }
+    return second;
   }
 
   /** The model's cleaned answer to one prompt, from the cache when possible; `usable` rejects bad answers before they are cached. */
