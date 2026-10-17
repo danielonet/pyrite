@@ -9,6 +9,7 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import lombok.Getter;
+import pyrite.runtime.Py;
 
 import sample_python_project.inventory.Models.Customer;
 import sample_python_project.inventory.Models.Order;
@@ -49,7 +50,7 @@ public class OrderService {
      * @return the result
      */
     public Order place_order(int customer_id, Map<String, Integer> items, String /* nullable */ note /* = null */) {
-        if (!items /* falsy: null or empty */) {
+        if (!Py.truthy(items)) {
             throw new IllegalArgumentException("cannot place an empty order");
         }
         if (items.size() > MAX_LINES_PER_ORDER) {
@@ -63,7 +64,7 @@ public class OrderService {
             String sku = entry.getKey();
             int quantity = entry.getValue();
             Product product = this.repo.product(sku);
-            if (!product.in_stock()) {
+            if (!Py.truthy(product.in_stock())) {
                 throw new IllegalArgumentException(product.name + " is out of stock");
             }
             product.reserve(quantity);

@@ -7,9 +7,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
-// python: from typing import Any, Callable, Iterable, Sequence
+import pyrite.runtime.Tuple;
 
-// No Java import found for: Tuple
+// python: from typing import Any, Callable, Iterable, Sequence
 
 /** Small text formatting helpers. */
 public final class Formatting {

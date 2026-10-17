@@ -9,13 +9,12 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import lombok.Data;
+import pyrite.runtime.Property;
 
 // python: from dataclasses import dataclass, field
 // python: from datetime import datetime
 // python: from enum import Enum
 // python: from typing import Optional
-
-// No Java import found for: @Property
 
 /** Domain model: products, customers and orders. */
 public final class Models {

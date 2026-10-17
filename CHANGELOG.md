@@ -8,6 +8,41 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **Runtime library.** Python semantics with no one-line Java equivalent go
+  through a small Java library whose sources Pyrite writes into the view
+  project (`src/main/java/pyrite/runtime/`, imported like any other class):
+  `Py` (`truthy`, `slice`, `at`, `len`, `repr`), `Tuple` (an immutable `List`
+  that prints and compares like Python, with `zip` and `enumerate`), and the
+  commonly used part of `os`, `os.path`, `sys`, `re`, `time` and `warnings`
+  as `Os`, `Os.path`, `Sys`, `Re`, `Time`, `Warnings`. `Re` takes Python
+  pattern syntax and returns Python's results (`match` anchored at the start,
+  `findall` returning groups, `split` keeping groups, `sub` with `\1` or a
+  function, `None` as `null`). `@Property` / `@PropertySetter` mark what was
+  a Python property and setter (the setter marker was `@Setter`, which read
+  as Lombok's).
+- **Python modules map to Java.** `os.path.join(a, b)` -> `Os.path.join(a,
+  b)`, `sys.argv` -> `Sys.argv`, `re.match(p, s)` -> `Re.match(p, s)`, for the
+  members the runtime implements (anything else keeps its Python spelling);
+  `from os.path import join` is a static import. `math` maps to
+  `java.lang.Math` (`math.floor(x)` -> `(long) Math.floor(x)`, `math.log(x,
+  b)` -> `Math.log(x) / Math.log(b)`).
+- **Truthiness is rewritten.** In a condition, each operand of `and`, `or` and
+  `not` that is a value rather than a boolean goes through `Py.truthy` (`if
+  items and not done:` -> `if (Py.truthy(items) && !done)`). Comparisons,
+  predicate calls (`contains`, `startsWith`, `is_valid`, `isdir`, ...) and
+  names known to be booleans are left alone. `not isinstance(x, T)` is
+  `!(x instanceof T)`; it was `!x instanceof T`, which Java reads as
+  `(!x) instanceof T`.
+- **Locals are declared where Java can see them.** A name first assigned in
+  an `if`/`else`/`try`/`with` branch but used after it (or in a sibling
+  branch) is declared before the block, typed when every assignment agrees
+  and initialized (`String label = null;`); never inside a loop body, where
+  Python keeps the value across iterations, nor directly in a `match`.
+
+javac errors on the gated Python 3.12 standard library (`npm run measure`):
+34,629 -> 26,384: unknown names 10,549 -> 6,269, runtime library 2,674 -> 0,
+truthiness 1,581 -> 191, module references 4,409 -> 2,702.
+
 - **Generators are collected eagerly.** Java has no `yield` that suspends a
   method, and `yield x;` was left as text. A generator function now declares
   `List<T> yielded = new ArrayList<>();`, `yield x` -> `yielded.add(x)`,

@@ -22,6 +22,8 @@
 
 import { SymbolInfo } from '../types';
 import { JDK_CLASSES } from './jdkClasses';
+import { RUNTIME_MODULE_CLASSES, runtimeImportFor } from './pythonModules';
+import { RUNTIME_PACKAGE } from './runtimePackage';
 
 /** One line of the new import block, with the Python line it came from (0 when synthetic). */
 export interface ImportLine {
@@ -39,6 +41,10 @@ export interface UnresolvedName {
    */
   annotation: boolean;
 }
+
+export { RUNTIME_PACKAGE };
+/** Classes of the runtime library the rules engine writes calls to (module classes too: `Os`, `Re`, ...). */
+export const RUNTIME_CLASSES = new Set(['Py', 'Tuple', 'Property', 'PropertySetter', ...RUNTIME_MODULE_CLASSES]);
 
 export interface ImportPlan {
   /** Index range [start, end) of the import block in the Java lines (empty when there is none). */
@@ -239,6 +245,14 @@ export function planImports(view: JavaView, pythonSource: string, modules: Recor
     // The rules put the base package in front of the project's own modules; the module keys are Python's.
     const unprefixed = basePackage && imp.target.startsWith(`${basePackage}.`) ? imp.target.slice(basePackage.length + 1) : '';
     const mod = (unprefixed && projectModule(unprefixed, modules)) || projectModule(imp.target, modules);
+    // `from os.path import join`: a static import of the runtime library's function. (Module
+    // references, `os.path.join`, are rewritten to the runtime class and imported where used.)
+    const runtime = !mod && !imp.wildcard ? runtimeImportFor(imp.target) : undefined;
+    if (runtime?.isStatic) {
+      projectStatic.add(runtime.fqn);
+      usefulPyLines.add(py);
+      continue;
+    }
     if (!mod) {
       pythonOnlyLines.add(py);
       continue;
@@ -284,6 +298,10 @@ export function planImports(view: JavaView, pythonSource: string, modules: Recor
       if (declared.has(name) || imported.has(name) || typeParams.has(name) || /^[A-Z]\d*$/.test(name)) continue;
       if (annotation && LOMBOK_ANNOTATIONS.has(name)) {
         library.add(`lombok.${name}`);
+        continue;
+      }
+      if (RUNTIME_CLASSES.has(name)) {
+        library.add(`${RUNTIME_PACKAGE}.${name}`);
         continue;
       }
       const fqn = jdkClassFor(name);

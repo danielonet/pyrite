@@ -84,7 +84,10 @@ function pythonModules() {
   console.log(`${files.length} files: ${noStub} need no stub, ${parses} parse after the gate, ${stubs} stubs`);
   if (!withJavac) return;
 
-  fs.writeFileSync(path.join(dir, 'files.txt'), javaFiles.join('\n'));
+  // Pyrite's runtime library, which the views import (pyrite.runtime.Py, Tuple, ...).
+  const runtime = path.join(__dirname, '..', 'runtime', 'src', 'main', 'java', 'pyrite', 'runtime');
+  const runtimeFiles = fs.readdirSync(runtime).filter((f) => f.endsWith('.java')).map((f) => path.join(runtime, f));
+  fs.writeFileSync(path.join(dir, 'files.txt'), [...javaFiles, ...runtimeFiles].join('\n'));
   const classes = path.join(dir, 'classes');
   fs.mkdirSync(classes);
   const javac = spawnSync('javac', ['-proc:none', '-implicit:none', '-nowarn', '-encoding', 'UTF-8', '-Xmaxerrs', '1000000', '-XDshould-stop.ifError=FLOW', '-XDshould-stop.at=FLOW', '-d', classes, `@${path.join(dir, 'files.txt')}`], { encoding: 'utf8', maxBuffer: 1 << 30 });

@@ -27,8 +27,75 @@ import { DEFAULT_LINE_WIDTH, formatJavaLine } from './layout';
 import { applyImports, codeOnly, planImports, renderImports } from '../imports/javaImports';
 import { NullabilityScan, boxIfNullable, nullableType, scanNullability } from './nullability';
 import { UNDERSCORE_NAME, renameJavaReservedIdentifiers } from './javaNames';
+import { HoistedLocal, planHoistedLocals } from './scoping';
+import { RUNTIME_MODULES } from '../imports/pythonModules';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'static' | 'other';
+
+/** Java methods that return a boolean, so a condition needs no `Py.truthy` around them. */
+const BOOLEAN_METHODS = new Set([
+  'contains', 'containsKey', 'containsValue', 'containsAll', 'startsWith', 'endsWith', 'isEmpty', 'isBlank', 'equals',
+  'equalsIgnoreCase', 'matches', 'find', 'hasNext', 'exists', 'anyMatch', 'allMatch', 'noneMatch', 'isAssignableFrom',
+  'isInstance', 'isPresent', 'test', 'add', 'remove', 'removeIf', 'offer', 'tryLock', 'isAlive', 'isDirectory', 'isFile',
+  'isDigit', 'isLetter', 'isLetterOrDigit', 'isWhitespace', 'isUpperCase', 'isLowerCase', 'isNaN', 'isInfinite',
+]);
+
+/**
+ * `a && !b || c` split at the top-level `&&` / `||`: operands at even indexes, operators at odd
+ * ones. Undefined when the condition has a top-level `? :` (left as it is).
+ */
+function splitBoolean(java: string): string[] | undefined {
+  const parts: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < java.length; i += 1) {
+    const ch = java[i];
+    if ('([{'.includes(ch)) depth += 1;
+    else if (')]}'.includes(ch)) depth -= 1;
+    else if (depth === 0 && ch === '?') return undefined;
+    else if (depth === 0 && (java.startsWith('&&', i) || java.startsWith('||', i))) {
+      parts.push(java.slice(from, i), java.slice(i, i + 2));
+      from = i + 2;
+      i += 1;
+    }
+  }
+  parts.push(java.slice(from));
+  return parts;
+}
+
+/**
+ * Names the file binds to modules that have a Java counterpart (see `pythonModules.ts`):
+ * `import os` -> os, `import re as regex` -> regex, `from os import path` -> path (os.path),
+ * `import math` -> math.
+ */
+function importedRuntimeModules(lines: LogicalLine[]): Map<string, string> {
+  const known = (mod: string) => mod === 'math' || Object.prototype.hasOwnProperty.call(RUNTIME_MODULES, mod);
+  const modules = new Map<string, string>();
+  for (const l of lines) {
+    if (l.kind !== 'code') continue;
+    const text = l.text.trim();
+    let m = /^import\s+(.+)$/.exec(text);
+    if (m) {
+      for (const part of m[1].split(',')) {
+        const [mod, alias] = part.trim().split(/\s+as\s+/);
+        // `import os.path` binds `os`.
+        if (alias && known(mod)) modules.set(alias, mod);
+        else if (!alias && known(mod.split('.')[0])) modules.set(mod.split('.')[0], mod.split('.')[0]);
+      }
+      continue;
+    }
+    m = /^from\s+([\w.]+)\s+import\s+\(?([^)]+)\)?$/.exec(text);
+    if (!m) continue;
+    for (const part of m[2].split(',')) {
+      const [name, alias] = part.trim().split(/\s+as\s+/);
+      if (name && known(`${m[1]}.${name}`)) modules.set(alias ?? name, `${m[1]}.${name}`);
+    }
+  }
+  return modules;
+}
+
+/** The value a hoisted local starts with, by type (`null` for the rest). */
+const DEFAULT_VALUES: Record<string, string> = { int: '0', long: '0L', double: '0.0', float: '0.0f', boolean: 'false', char: "'\\0'", short: '0', byte: '0' };
 
 interface Block {
   indent: number;
@@ -64,6 +131,8 @@ interface Block {
   blockLocals?: string[];
   /** Name bound by `except ... as name` for this catch block. */
   catchVar?: string;
+  /** Function scope: locals declared ahead of a nested first assignment, by the line they precede. */
+  hoists?: Map<number, HoistedLocal[]>;
   /** Generator function: the list its `yield`s add to (collected eagerly), returned at the end. */
   yielded?: string;
   /** The generator is declared to return an `Iterator`: it returns `yielded.iterator()`. */
@@ -258,6 +327,7 @@ class RuleTranslation {
   constructor(private readonly input: TranslateInput) {
     this.lines = splitLogicalLines(input.source);
     renameJavaReservedIdentifiers(this.lines);
+    this.pythonModules = importedRuntimeModules(this.lines);
     this.scan = scanMembers(this.lines);
     this.localKnown = toKnownMembers(this.scan);
     this.known = input.knownMembers;
@@ -332,8 +402,12 @@ class RuleTranslation {
     return undefined;
   }
 
+  /** Local names bound to Python modules with a Java counterpart (`os`, `osp` -> `os.path`, ...). */
+  private pythonModules: Map<string, string>;
+
   private exprCtx(literals?: string[], valueContext = false): ExprContext {
     return {
+      modules: this.pythonModules,
       className: this.nearestClass()?.className,
       literals,
       valueContext,
@@ -861,6 +935,7 @@ class RuleTranslation {
       return;
     }
     if (!continuation) this.placeInStaticBlock(code, py);
+    if (!continuation) this.emitHoistedLocals(i, py);
 
     // `if x: return 1`, `except: pass`, `def f(): return 1` - a compound statement with its body
     // on the same line. The header opens the block as usual; the body is translated inside it,
@@ -956,7 +1031,7 @@ class RuleTranslation {
     }
     if (/^if\s+__name__\s*==\s*.\d+.\s*:$/.test(code)) {
       this.emit(`public static void main(String[] args) {${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'main', declared: new Set(['args']), types: new Map([['args', 'String[]']]) });
+      this.stack.push({ indent: line.indent, kind: 'main', declared: new Set(['args']), types: new Map([['args', 'String[]']]), hoists: planHoistedLocals(this.lines, i, new Set(['args'])) });
       return;
     }
     if ((m = /^if\s+(.+):$/.exec(code))) {
@@ -1096,15 +1171,55 @@ class RuleTranslation {
   }
 
   private condition(maskedCond: string, lits: string[]): string {
-    const translated = unmaskStrings(translateMaskedExpression(maskedCond.trim(), this.exprCtx(lits)), lits);
-    // Python truthiness: a bare value is "true" when non-null and non-empty - unless it is known to be a boolean.
-    const bare = maskedCond.trim().replace(/^not\s+/, '');
-    const isBoolean = /^boolean\b/.test(this.typeOf(bare, lits) ?? '');
-    if (!isBoolean && /^!?[\w.]+(\(\))?$/.test(translated) && !/^(true|false|null)$/.test(translated)) {
-      return `${translated} /* ${translated.startsWith('!') ? 'falsy: null or empty' : 'truthy: non-null and non-empty'} */`;
-    }
-    return translated;
+    const java = translateMaskedExpression(maskedCond.trim(), this.exprCtx(lits));
+    return unmaskStrings(this.truthy(java), lits);
   }
+
+  /**
+   * Python truthiness in a (masked) Java condition: each operand of `&&`, `||` and `!` that is a
+   * value rather than a boolean expression is tested with `Py.truthy` (None, zero and empty are
+   * false), since Java only accepts booleans there.
+   *
+   *   if items and not done:   ->   if (Py.truthy(items) && !done)      (done is a boolean)
+   */
+  private truthy(java: string): string {
+    const parts = splitBoolean(java);
+    if (!parts) return java;
+    return parts.map((part, k) => (k % 2 ? part : this.truthyOperand(part))).join('');
+  }
+
+  private truthyOperand(operand: string): string {
+    const lead = /^\s*/.exec(operand)![0];
+    const trail = /\s*$/.exec(operand)![0];
+    let text = operand.trim();
+    let bangs = '';
+    while (text.startsWith('!') && !text.startsWith('!=')) {
+      bangs += '!';
+      text = text.slice(1).trim();
+    }
+    if (text.startsWith('(') && groupEndIndex(text) === text.length && !/^\((int|long|double|float|char|boolean|String)\)/.test(text)) {
+      return `${lead}${bangs}(${this.truthy(text.slice(1, -1))})${trail}`;
+    }
+    if (this.isBooleanExpression(text)) return `${lead}${bangs}${text}${trail}`;
+    return `${lead}${bangs}Py.truthy(${text})${trail}`;
+  }
+
+  /** Whether a Java expression is already a boolean (a comparison, a predicate call, a boolean name). */
+  private isBooleanExpression(text: string): boolean {
+    if (/^(true|false)$/.test(text) || /\/\* walrus \*\//.test(text) || /^Py\.truthy\(/.test(text)) return true;
+    if (indexAtDepth0(text, /==|!=|<=|>=|<(?![\w?]+>)|>|\binstanceof\b|\?/) >= 0) return true;
+    // A predicate: `xs.contains(x)`, `s.startsWith(p)`, `is_valid(x)`, `o.hasNext()`.
+    // A predicate call (`xs.contains(x)`, `is_valid(x)`, `o.hasNext()`) or attribute (`o.is_active`).
+    // `is_valid`, `isValid`, and Python's own `isdir`, `isdigit`, `isinstance`.
+    const predicate = /^(?:(is|has|can|should|was|will|needs|contains|exists|matches|startswith|endswith|callable)(?:_|[A-Z]|$)|is[a-z]{2,}$)/;
+    const call = /(?:^|\.)([A-Za-z_]\w*)\((?:[^()]|\([^()]*\))*\)(?:\s*\/\*[^*]*\*\/)?$/.exec(text);
+    if (call && (BOOLEAN_METHODS.has(call[1]) || predicate.test(call[1]))) return true;
+    const attribute = /^[\w.]+\.([A-Za-z_]\w*)$/.exec(text);
+    if (attribute && predicate.test(attribute[1])) return true;
+    const type = /^[A-Za-z_]\w*$/.test(text) ? this.enclosingScope()?.types?.get(text) : undefined;
+    return type !== undefined && /^(boolean|Boolean)\b/.test(type);
+  }
+
 
   // ------------------------------------------------------------------ class
 
@@ -1448,12 +1563,13 @@ class RuleTranslation {
       // A function inside a function: Java has no nested methods, so it becomes a lambda.
       for (const d of decorators) this.emit(`// ${d.text}`, d.py);
       this.translateNestedDef(line, name, rawParams, ret, declared, types, nullability, enclosing, comment);
+      this.top()!.hoists = planHoistedLocals(this.lines, i, declared);
       if (generator) this.startGenerator(i, ret, py);
       return;
     }
     for (const d of otherDecorators) this.emit(this.decoratorToAnnotation(d.text), d.py);
     if (isProperty) this.emit(`@Property // Python property: read as obj.${name}, rendered as obj.${name}()`, py);
-    if (isSetter) this.emit(`@Setter // Python setter: obj.${name} = value, rendered as obj.${name}(value)`, py);
+    if (isSetter) this.emit(`@PropertySetter // Python setter: obj.${name} = value, rendered as obj.${name}(value)`, py);
 
     const generic = typeParams.length ? `<${typeParams.join(', ')}> ` : '';
     const signature = `${modifiers.join(' ')}${modifiers.length ? ' ' : ''}${generic}${isCtor ? '' : `${ret} `}${javaName}(${params.join(', ')})`;
@@ -1472,7 +1588,7 @@ class RuleTranslation {
       // Unusual: abstract method with a real body - reopen as a block.
       this.out[this.out.length - 1].text = this.out[this.out.length - 1].text.replace(/;(\s*\/\/.*)?$/, ' {$1');
     }
-    this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability });
+    this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability, hoists: planHoistedLocals(this.lines, i, declared) });
     if (generator && !isCtor) this.startGenerator(i, ret, py);
   }
 
@@ -2244,6 +2360,24 @@ class RuleTranslation {
       const value = k === star ? `${source}.subList(${k}, ${source}.size()${targets.length - k - 1 > 0 ? ` - ${targets.length - k - 1}` : ''})` : star >= 0 && k > star ? `${source}.get(${source}.size() - ${targets.length - k})` : `${source}.get(${k})`;
       this.emitFieldOrLocal(t, 'Object', value, py, '');
     });
+  }
+
+  /**
+   * Declarations planned by `planHoistedLocals` for the statement at line `i`: a local first
+   * assigned in a nested block but used outside it. Typed when every assigned value agrees, and
+   * initialized, so later assignments are plain and Java sees it definitely assigned.
+   */
+  private emitHoistedLocals(i: number, py: number): void {
+    const fn = [...this.stack].reverse().find((b) => b.kind === 'def' || b.kind === 'main');
+    for (const h of fn?.hoists?.get(i) ?? []) {
+      if (fn!.declared?.has(h.name)) continue;
+      const types = h.values.map((v) => (v ? this.inferValueType(v.masked, v.literals) : 'Object'));
+      let type = types.every((t) => t === types[0]) && !/^var$|\/\*/.test(types[0]) ? types[0] : 'Object';
+      type = boxIfNullable(type, fn!.nullability?.names.has(h.name) === true);
+      fn!.declared?.add(h.name);
+      if (type !== 'Object') fn!.types?.set(h.name, type);
+      this.emit(`${type} ${h.name} = ${DEFAULT_VALUES[type] ?? 'null'};`, py);
+    }
   }
 
   /** Emit `name = value` as a field (class/module level) or a local variable (function level). */

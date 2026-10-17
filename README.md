@@ -119,6 +119,10 @@ What it maps:
 | `x = repo.order(1)` where `order` has a `-> Order` hint, `for line in self.lines` with `lines: List[OrderLine]` | `Order x = ...`, `for (OrderLine line : this.lines)` - types follow hints on functions, methods (also from other files and base classes), fields and parameters |
 | `f"Hi {name}, {total:.2f}"` | `"Hi " + name + ", " + String.format("%.2f", total)` |
 | `x if c else y`, `and/or/not`, `None/True/False` | `c ? x : y`, `&&/\|\|/!`, `null/true/false` |
+| `if items and not done:` (truthiness) | `if (Py.truthy(items) && !done)` - a value that is not a boolean goes through the [runtime library](#runtime-library) |
+| `xs[1:-1]`, `f()[-1]`, `(a, b)`, `zip(a, b)` | `xs.subList(1, xs.size() - 1)`, `f().getLast()`, `Tuple.of(a, b)`, `Tuple.zip(a, b)` |
+| `os.path.join(a, b)`, `sys.argv`, `re.match(p, s)`, `math.floor(x)` | `Os.path.join(a, b)`, `Sys.argv`, `Re.match(p, s)`, `(long) Math.floor(x)` |
+| a name assigned in an `if`/`try` branch and used after it | declared before the block (`String label = null;`), since a Java local lives only in its block |
 | `Optional[T]`, `list[int]`, `dict[str, Any]` | `T /* nullable */`, `List<Integer>`, `Map<String, Object>` |
 | `ValueError`, `KeyError`, ... | `IllegalArgumentException`, `NoSuchElementException`, ... |
 | docstrings / `# comments` | Javadoc / `// comments` |
@@ -220,6 +224,24 @@ the Python-shaped lines, which read like the Python but are not Java.
 
 The rest of the view is still a reading view (`logging.getLogger(__name__)` is not Java), so
 the imports are what is real today, not the whole file.
+
+### Runtime library
+
+Some Python has no one-line Java equivalent: truthiness, slices with negative or
+out-of-range bounds, tuples, `re` with its Python syntax and results. The views call a small
+Java library for those instead of guessing, and Pyrite writes its sources into the view
+project (`src/main/java/pyrite/runtime/`, imported like any other class):
+
+| Class | For |
+| --- | --- |
+| `Py` | `Py.truthy(x)`, `Py.slice(xs, lo, hi[, step])`, `Py.at(xs, -2)`, `Py.len`, `Py.repr` |
+| `Tuple` | `Tuple.of(a, b)`, `Tuple.zip(...)`, `Tuple.enumerate(...)`: an immutable `List` that prints and compares like Python |
+| `Os`, `Os.path`, `Sys`, `Re`, `Time`, `Warnings` | the commonly used part of `os`, `os.path`, `sys`, `re` (Python pattern syntax, `match` anchored at the start, `findall` returning groups, `sub` with `\1` or a function), `time`, `warnings` |
+| `@Property`, `@PropertySetter` | mark methods that were a Python `@property` / setter |
+
+Only the module members the library implements are rewritten (`os.path.join` ->
+`Os.path.join`); anything else keeps its Python spelling (`os.stat(p)`), so what is missing
+stays visible. `math` maps to `java.lang.Math`.
 
 ## Running a local LLM with Ollama
 
@@ -357,5 +379,4 @@ The generated folder contains its own `.gitignore` so it is never committed.
 - The rules engine is line-oriented. Deeply nested comprehensions, exotic
   decorators, metaclasses and dynamic attribute tricks are kept verbatim with a comment
   (nested comprehensions and `:=` can be rewritten by the `hybrid` engine's local model).
-- Python truthiness (`if items:`) is annotated, not rewritten.
 - Types are inferred from hints, defaults and simple literals only; unknown types show as `Object`/`var`.

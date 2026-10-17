@@ -237,7 +237,7 @@ def f(items, d):
   contains(out, '} finally {');
   contains(out, 'try (var fh = new BufferedReader(new FileReader(p))) { // with');
   contains(out, 'var data = fh.read();');
-  contains(out, 'while (!done /* falsy: null or empty */) {');
+  contains(out, 'while (!Py.truthy(done)) {');
   contains(out, 'done = step();'); // second assignment: no re-declaration
 });
 
@@ -870,7 +870,7 @@ def f(note, buffer):
 `);
   contains(out, 'var label = Objects.requireNonNullElse(note, "n/a");');
   contains(out, 'var stream = Objects.requireNonNullElse(buffer, new io.StringIO());');
-  contains(out, 'if (note || buffer) {');
+  contains(out, 'if (Py.truthy(note) || Py.truthy(buffer)) {');
   contains(out, 'return Objects.requireNonNullElse(note, buffer);');
   contains(out, 'return note == null || buffer;');
 });
@@ -1162,7 +1162,8 @@ def one(): return 1
 class Empty: pass
 if __name__ == "__main__": classify("-n", [])
 `);
-  contains(out, 'if (o == "-n") {\n            int kind = 1;\n        } else if (o == "-t") {\n            kind = 2;\n        } else {\n            kind = 0;\n        }');
+  // `kind` is used after the chain, so it is declared before it (a Java local lives in its block).
+  contains(out, 'int kind = 0;\n        if (o == "-n") {\n            kind = 1;\n        } else if (o == "-t") {\n            kind = 2;\n        } else {\n            kind = 0;\n        }');
   contains(out, 'try {\n            xs.check();\n        } catch (Exception e) {\n            // pass\n        }');
   contains(out, 'for (var x : xs) {\n            kind += x;\n        }');
   contains(out, 'while (kind > 100) {\n            kind -= 1;\n        }');
@@ -1753,7 +1754,7 @@ def find(xs, target):
         cleanup()
 `);
   contains(out, '        boolean broke = false;\n        for (var x : xs) {');
-  contains(out, '                if (y /* truthy: non-null and non-empty */) {\n                    break;\n');
+  contains(out, '                if (Py.truthy(y)) {\n                    break;\n');
   contains(out, '                broke = true;\n                break;\n            }\n        }\n        if (!broke) { // loop-else: runs when the loop did not break\n            return null;\n        }');
   contains(out, '        boolean broke2 = false;\n        while (');
   contains(out, '        if (!broke2) { // loop-else: runs when the loop did not break\n            cleanup();');
@@ -1777,7 +1778,7 @@ def f():
     finally:
         close()
 `);
-  contains(out, '        boolean raised = false;\n        try {\n            var v = load();\n        } catch (IllegalArgumentException ignored) {\n            raised = true;');
+  contains(out, '        Object v = null;\n        boolean raised = false;\n        try {\n            v = load();\n        } catch (IllegalArgumentException ignored) {\n            raised = true;');
   contains(out, '        }\n        if (!raised) { // try-else: runs when no exception was raised\n            use(v);\n        }');
   contains(out, '        try { // try / except / else / finally\n            boolean raised2 = false;\n            try {');
   contains(out, '            if (!raised2) { // try-else: runs when no exception was raised\n                use(w);\n            }\n        } finally {\n            close();\n        }');
@@ -2010,7 +2011,7 @@ def f(lines, end):
             g(end):
         pass
 `);
-  contains(out, 'if (lines.get(end) == "#" && g(end)) {');
+  contains(out, 'if (lines.get(end) == "#" && Py.truthy(g(end))) {');
 });
 
 test('comprehensions: tuple targets, nesting, several clauses and dict(pairs)', () => {
@@ -2149,4 +2150,118 @@ test('imports: real Java imports by default; Python modules stay as comments', (
   contains(out, 'import java.io.BufferedReader;\nimport java.io.FileReader;\n\nimport shop.app.Repo;\n\n// python: import os\n// python: from typing import List\n');
   assert.ok(!/^import (os|typing)/m.test(out), 'no Python module is imported as if it were Java');
   assert.ok(!/import java\.util\.\*;/.test(out), 'wildcards are replaced by the classes used');
+});
+
+test('scoping: a local first assigned in a nested block but used outside it is declared ahead', () => {
+  const out = java(`
+def f(ok, xs, path, cmd):
+    if ok:
+        label = "yes"
+    else:
+        label = "no"
+    print(label)
+    for x in xs:
+        if x > 1:
+            last = x
+            count = 1
+    print(last)
+    if ok: flag = True
+    match cmd:
+        case 1:
+            r = 2
+        case _:
+            r = 3
+    return flag, r
+
+def g(ok):
+    if ok:
+        inner = 1
+        print(inner)
+`);
+  contains(out, '        String label = null;\n        if (Py.truthy(ok)) {');
+  contains(out, '            label = "yes";\n        } else {\n            label = "no";\n        }');
+  // Never declared inside the loop: the value must survive iterations.
+  contains(out, '        Object last = null;\n        for (var x : xs) {');
+  contains(out, '                last = x;\n                int count = 1;');
+  contains(out, '        boolean flag = false;\n        if (Py.truthy(ok)) {');
+  // Not between `switch (...) {` and the first case.
+  contains(out, '        int r = 0;\n        switch (cmd) {');
+  // Used only where it is assigned: declared there.
+  contains(out, '            int inner = 1;');
+});
+
+test('truthiness: values in conditions go through Py.truthy; booleans and predicates do not', () => {
+  const out = java(`
+def f(items, done: bool, params, node, flags, d, s, it, p):
+    if items and not done:
+        pass
+    if not params or params[0] in (1, 2):
+        pass
+    if not isinstance(node, Constant) or flags & 4:
+        pass
+    if d.get("k") and s.startswith("x"):
+        pass
+    if is_valid(s) and it.has_next() and p.isdigit():
+        pass
+`);
+  contains(out, 'if (Py.truthy(items) && !done) {');
+  contains(out, 'if (!Py.truthy(params) || List.of(1, 2).contains(params.get(0))) {');
+  contains(out, 'if (!(node instanceof Constant) || Py.truthy(flags & 4)) {');
+  contains(out, 'if (Py.truthy(d.get("k")) && s.startsWith("x")) {');
+  contains(out, 'if (is_valid(s) && it.has_next() && p.chars().allMatch(Character::isDigit)) {');
+  contains(out, 'import pyrite.runtime.Py;');
+});
+
+test('python modules: os, sys, re, time map to the runtime library, math to java.lang.Math', () => {
+  const out = java(`
+import os
+import sys
+import re as regex
+import math
+import time
+from os.path import join
+
+def f(a, b, s):
+    p = os.path.join(a, b)
+    print(sys.argv[1], os.environ.get("HOME", "x"), join(a, b))
+    st = os.stat(p)
+    m = regex.match(r"(\\d+)", s)
+    sys.stdout.write("hi")
+    x = math.floor(math.sqrt(a)) + math.pi + math.log(a, 2)
+    t = time.time()
+`);
+  contains(out, 'var p = Os.path.join(a, b);');
+  contains(out, 'Sys.argv.get(1), Os.environ.getOrDefault("HOME", "x"), join(a, b)');
+  // Not in the runtime: left as Python wrote it.
+  contains(out, 'var st = os.stat(p);');
+  contains(out, 'var m = Re.match("(\\\\d+)", s);');
+  contains(out, 'Sys.stdout.write("hi");');
+  contains(out, 'var x = (long) Math.floor(Math.sqrt(a)) + Math.PI + (Math.log(a) / Math.log(2));');
+  contains(out, 'var t = Time.time();');
+  contains(out, 'import pyrite.runtime.Os;\nimport pyrite.runtime.Re;\nimport pyrite.runtime.Sys;\nimport pyrite.runtime.Time;');
+  contains(out, 'import static pyrite.runtime.Os.path.join;');
+});
+
+test('runtime library: a view that uses it gets its sources in the project, written once', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-runtime-'));
+  try {
+    const { translator } = createTranslator({ engine: 'rules' });
+    fs.writeFileSync(path.join(root, 'plain.py'), 'def f(a):\n    return a + 1\n', 'utf8');
+    await mirrorFile(translator, root, 'plain.py');
+    const runtimeDir = path.join(root, '.java-view', 'src', 'main', 'java', 'pyrite', 'runtime');
+    assert.equal(fs.existsSync(runtimeDir), false, 'a view that needs no runtime class writes none');
+
+    fs.writeFileSync(path.join(root, 'uses.py'), 'def f(xs):\n    if xs:\n        return xs[1:-1]\n', 'utf8');
+    await mirrorFile(translator, root, 'uses.py');
+    for (const name of ['Py.java', 'Tuple.java', 'Os.java', 'Re.java']) {
+      const text = fs.readFileSync(path.join(runtimeDir, name), 'utf8');
+      contains(text, 'package pyrite.runtime;');
+    }
+    const before = fs.statSync(path.join(runtimeDir, 'Py.java')).mtimeMs;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await mirrorFile(translator, root, 'uses.py');
+    assert.equal(fs.statSync(path.join(runtimeDir, 'Py.java')).mtimeMs, before, 'files already up to date are not rewritten');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

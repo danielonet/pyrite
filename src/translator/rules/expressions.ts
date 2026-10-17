@@ -8,6 +8,7 @@
 import { PLACEHOLDER_RE, SIMPLE_OPERAND, maskStrings, setFStringExpressionHook, unmaskStrings } from './strings';
 import { splitTopLevel } from './typeHints';
 import { rewriteBuiltinCalls, rewriteOrFallback, streamOf } from './builtins';
+import { MATH_MEMBERS, RUNTIME_MODULES, mathLog } from '../imports/pythonModules';
 import { rewriteIntLiterals } from './numbers';
 
 export interface ExprContext {
@@ -23,6 +24,8 @@ export interface ExprContext {
   fieldRenames?: Map<string, string>;
   /** Nested functions in scope, rendered as lambdas: calls become `name.apply(...)` and the like. */
   localFunctions?: Map<string, LocalFunction>;
+  /** Local names bound to Python modules with a Java counterpart: `os` -> `os`, `osp` -> `os.path`. */
+  modules?: Map<string, string>;
 }
 
 /** How a nested function, translated to a lambda, is called. */
@@ -965,6 +968,71 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   t = t.replace(/(?<![\w)\]])\(([^(),]+),\s*\)/g, 'Tuple.of($1)');
   t = t.replace(/,\s*\)/g, ')');
   if (t.includes(')(')) t = rewriteCallsOnValues(t, ctx.className);
+  if (t.includes(' instanceof ')) t = parenthesizeNegatedInstanceof(t);
+  if (ctx.modules?.size) t = rewriteModuleReferences(t, ctx.modules);
+  return t;
+}
+
+/**
+ * References to Python modules with a Java counterpart (see `pythonModules.ts`):
+ *
+ *   os.path.join(a, b)  -> Os.path.join(a, b)       sys.argv     -> Sys.argv
+ *   re.compile(p)       -> Re.compile(p)            math.floor(x) -> (long) Math.floor(x)
+ *
+ * Members the counterpart lacks keep their Python spelling.
+ */
+function rewriteModuleReferences(text: string, modules: Map<string, string>): string {
+  let t = text;
+  for (const [local, module] of modules) {
+    const ref = new RegExp(`(?<![\\w.$\\u0001])${local}\\.(\\w+)(?:\\.(\\w+))?`, 'g');
+    t = t.replace(ref, (m: string, member: string, next: string | undefined, offset: number, whole: string) => {
+      if (module === 'math') return m; // calls need their arguments: below
+      // `os.path.join` through `import os`.
+      const sub = next !== undefined ? RUNTIME_MODULES[`${module}.${member}`] : undefined;
+      if (sub?.members.has(next!)) return `${sub.javaClass}.${next}`;
+      const mod = RUNTIME_MODULES[module];
+      if (!mod?.members.has(member)) return m;
+      return `${mod.javaClass}.${member}${next !== undefined ? `.${next}` : ''}`;
+    });
+    if (module === 'math') t = rewriteMath(t, local);
+  }
+  return t;
+}
+
+/** `math.sqrt(x)` -> `Math.sqrt(x)`, `math.pi` -> `Math.PI`, by the templates in `MATH_MEMBERS`. */
+function rewriteMath(text: string, local: string): string {
+  let t = text;
+  const ref = new RegExp(`(?<![\\w.$\\u0001])${local}\\.(\\w+)`, 'g');
+  for (let m = ref.exec(t); m; m = ref.exec(t)) {
+    const member = m[1];
+    const open = m.index + m[0].length;
+    const isCall = t[open] === '(';
+    const end = isCall ? groupEnd(t, open) : open;
+    const args = isCall ? splitTopLevel(t.slice(open + 1, end - 1)).map((a) => rewriteMath(a.trim(), local)).filter(Boolean) : [];
+    const template = member === 'log' && isCall ? mathLog(args) : MATH_MEMBERS[member];
+    if (template === undefined || (isCall !== /\$1/.test(template) && member !== 'log')) continue;
+    // `math.hypot(*xs)`: a spread argument does not fill the template's parameters.
+    const wanted = Math.max(0, ...[...template.matchAll(/\$(\d)/g)].map((x) => Number(x[1])));
+    if (args.length < wanted || args.some((a) => /\.toArray\(\)$/.test(a))) continue;
+    const java = template.replace(/\$(\d)/g, (_x, k: string) => args[Number(k) - 1] ?? '');
+    t = t.slice(0, m.index) + java + t.slice(end);
+    ref.lastIndex = m.index + java.length;
+  }
+  return t;
+}
+
+/** `!x instanceof T` (from `not isinstance(x, T)`) negates `x`, not the test: `!(x instanceof T)`. */
+function parenthesizeNegatedInstanceof(text: string): string {
+  let t = text;
+  for (let at = t.indexOf(' instanceof '); at >= 0; at = t.indexOf(' instanceof ', at + 12)) {
+    const start = postfixStart(t, at);
+    if (t[start - 1] !== '!') continue;
+    const typeEnd = at + 12 + (/^[\w.$]+(?:<[^<>]*>)?(?:\[\])*/.exec(t.slice(at + 12))?.[0].length ?? 0);
+    if (t[typeEnd] === '(') continue; // `x instanceof this.getClass()` is not a type test Java has
+
+    t = `${t.slice(0, start)}(${t.slice(start, typeEnd)})${t.slice(typeEnd)}`;
+    at += 2;
+  }
   return t;
 }
 

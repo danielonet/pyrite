@@ -6,6 +6,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.logging.Logger;
 
+import pyrite.runtime.Sys;
+import pyrite.runtime.Tuple;
+
 import sample_python_project.inventory.Models.Customer;
 import sample_python_project.inventory.Models.Order;
 import sample_python_project.inventory.Models.OrderStatus;
@@ -20,8 +23,6 @@ import static sample_python_project.inventory.utils.Formatting.table;
 
 // python: import logging
 // python: import sys
-
-// No Java import found for: Tuple
 
 /** Entry point: seeds a repository, runs a batch job and prints a report. */
 public final class Main {
@@ -71,6 +72,6 @@ public final class Main {
     }
 
     public static void main(String[] args) {
-        sys.exit(run(sys.argv.subList(1, sys.argv.size())));
+        Sys.exit(run(Sys.argv.subList(1, Sys.argv.size())));
     }
 }

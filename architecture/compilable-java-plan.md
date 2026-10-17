@@ -197,6 +197,24 @@ classes, Python imports as `// python:` comments), as the hybrid engine already 
 these numbers. Its parse-level counts: 108 of 167 files need no stub, 128 stubs (`TODO(pyrite)`
 occurrences in the 161 files that parse).
 
+1.18 (scoping), 0.3 (runtime library) and the first module mappings are done:
+
+- 1.18: `src/translator/rules/scoping.ts` plans, per function, the locals first assigned in a
+  nested block but used outside it; they are declared before the outermost statement around
+  every use (never inside a loop body or directly in a `match`). Loop targets used after their
+  loop are not handled yet.
+- 0.3: `runtime/src/main/java/pyrite/runtime/` (`Py`, `Tuple`, `Os`, `Sys`, `Re`, `Time`,
+  `Warnings`, `@Property`, `@PropertySetter`), written into every view project and resolved by
+  the import step. Checked against Python on slices, truthiness, tuples, `re` and `os.path`.
+  Truthiness is rewritten with `Py.truthy`.
+- Module mappings (`src/translator/imports/pythonModules.ts`): only implemented members are
+  rewritten; `math` -> `java.lang.Math`.
+
+javac errors 34,629 -> 26,384. Largest left: unknown names 6,269 (Python builtins such as
+`NotImplemented`, class attributes, loop targets after the loop, names of other modules),
+methods called on `Object` 5,663 and type mismatches 2,973 (0.2 types), unknown methods 2,882,
+module members the runtime lacks 2,702, call arity 1,941.
+
 Every item here produced a javac syntax error. Add a parse gate: run the Java output
 through a Java parser (tree-sitter-java or `javac -proc:none` on the single file). On
 failure, **degrade the offending statement** to a compile-safe stub

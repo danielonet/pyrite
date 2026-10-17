@@ -9,6 +9,8 @@ import java.util.Objects;
 import java.util.logging.Logger;
 
 import lombok.Data;
+import pyrite.runtime.Property;
+import pyrite.runtime.Py;
 
 import sample_python_project.inventory.Models.Order;
 import sample_python_project.inventory.Models.OrderStatus;
@@ -22,8 +24,6 @@ import static sample_python_project.inventory.utils.Formatting.chunked;
 // python: from abc import ABC, abstractmethod
 // python: from dataclasses import dataclass
 // python: from typing import Generic, Iterator, List, Optional, TypeVar
-
-// No Java import found for: @Property
 
 /**
  * A minimal chunk-oriented batch job, in the spirit of Spring Batch.
@@ -152,11 +152,12 @@ public final class Job {
             JobResult result = new JobResult();
             List<Object> items = new ArrayList<>(this.reader.read());
             result.read = items.size();
+            Object processed = null;
             for (var chunk : chunked(items, this.chunk_size)) {
                 List<O> outputs = new ArrayList<>();
                 for (var item : chunk) {
                     try {
-                        O /* nullable */ processed = this.processor.process(item);
+                        processed = this.processor.process(item);
                     } catch (Exception exc) { // noqa: BLE001 - skip policy
                         result.skipped += 1;
                         logger.warning("skipping %r: %s", item, exc);
@@ -170,7 +171,7 @@ public final class Job {
                         outputs.add(processed);
                     }
                 }
-                if (outputs /* truthy: non-null and non-empty */) {
+                if (Py.truthy(outputs)) {
                     this.writer.write(outputs);
                     result.written += outputs.size();
                 }
