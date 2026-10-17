@@ -164,7 +164,9 @@ export function translateType(hint: string | undefined | null, opts: { box?: boo
   if (bare in GENERICS) {
     const g = GENERICS[bare];
     if (g === '') return 'Object';
-    return g === 'Tuple' ? 'Tuple' : `${g}<?>`;
+    if (g === 'Tuple') return 'Tuple';
+    // A map takes two type arguments.
+    return /Map$/.test(g) ? `${g}<?, ?>` : `${g}<?>`;
   }
   return bare;
 }

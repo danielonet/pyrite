@@ -123,6 +123,8 @@ What it maps:
 | `xs[1:-1]`, `f()[-1]`, `(a, b)`, `zip(a, b)` | `xs.subList(1, xs.size() - 1)`, `f().getLast()`, `Tuple.of(a, b)`, `Tuple.zip(a, b)` |
 | `os.path.join(a, b)`, `sys.argv`, `re.match(p, s)`, `math.floor(x)` | `Os.path.join(a, b)`, `Sys.argv`, `Re.match(p, s)`, `(long) Math.floor(x)` |
 | a name assigned in an `if`/`try` branch and used after it | declared before the block (`String label = null;`), since a Java local lives only in its block |
+| `def f(text): return text.strip().split(",")` (no hint) | `f(String text)`: an unhinted parameter used only as a string, list or dict gets that type |
+| `s.split()`, `s.partition("=")`, `xs.pop()`, `s[0]` on a string | `Py.split(s)`, `Py.partition(s, "=")`, `Py.pop(xs)`, `String.valueOf(s.charAt(0))` |
 | `Optional[T]`, `list[int]`, `dict[str, Any]` | `T /* nullable */`, `List<Integer>`, `Map<String, Object>` |
 | `ValueError`, `KeyError`, ... | `IllegalArgumentException`, `NoSuchElementException`, ... |
 | docstrings / `# comments` | Javadoc / `// comments` |
@@ -234,9 +236,9 @@ project (`src/main/java/pyrite/runtime/`, imported like any other class):
 
 | Class | For |
 | --- | --- |
-| `Py` | `Py.truthy(x)`, `Py.slice(xs, lo, hi[, step])`, `Py.at(xs, -2)`, `Py.len`, `Py.repr` |
+| `Py` | `Py.truthy(x)`, `Py.slice(xs, lo, hi[, step])`, `Py.at(xs, -2)`, `Py.len`, `Py.repr`, Python's `str` methods (`split`, `strip(chars)`, `partition`, `splitlines`, `isdigit`, ...) and `pop` / `remove`; `NotImplemented`, `Ellipsis` |
 | `Tuple` | `Tuple.of(a, b)`, `Tuple.zip(...)`, `Tuple.enumerate(...)`: an immutable `List` that prints and compares like Python |
-| `Os`, `Os.path`, `Sys`, `Re`, `Time`, `Warnings` | the commonly used part of `os`, `os.path`, `sys`, `re` (Python pattern syntax, `match` anchored at the start, `findall` returning groups, `sub` with `\1` or a function), `time`, `warnings` |
+| `Os`, `Os.path`, `Sys`, `Re`, `Time`, `Warnings` | the commonly used part of `os`, `os.path`, `sys`, `re` (Python pattern syntax, `match` anchored at the start, `findall` returning groups, `sub` with `\1` or a function), `time`, `warnings` (with the warning categories as classes) |
 | `@Property`, `@PropertySetter` | mark methods that were a Python `@property` / setter |
 
 Only the module members the library implements are rewritten (`os.path.join` ->

@@ -13,7 +13,8 @@
  *
  * This module only plans where; the translator emits the declarations. A declaration never goes
  * inside a loop body (Python keeps the value from one iteration to the next) nor directly in a
- * `match`. Loop targets and `with`/`except` names keep their own scope.
+ * `match`. A loop target used after its loop is declared ahead too; `with`/`except` names keep
+ * their own scope.
  */
 
 import { LogicalLine } from './logicalLines';
@@ -139,7 +140,6 @@ export function planHoistedLocals(lines: LogicalLine[], header: number, params: 
     }
     let m: RegExpExecArray | null;
     if ((m = /^(?:global|nonlocal)\s+(.+)$/.exec(code))) m[1].split(',').forEach((n) => skip.add(n.trim()));
-    if ((m = /^(?:async\s+)?for\s+(.+?)\s+in\s/.exec(code))) targetNames(m[1]).forEach((n) => skip.add(n));
     for (const as of code.matchAll(/\bas\s+(\w+)/g)) skip.add(as[1]);
 
     const inline = oneLiner(code);
@@ -149,6 +149,15 @@ export function planHoistedLocals(lines: LogicalLine[], header: number, params: 
       continue;
     }
     record(code, j, path, masked.literals);
+    // A loop assigns its targets inside its own block: used after the loop, they are declared ahead.
+    if ((m = /^(?:async\s+)?for\s+(.+?)\s+in\s+(.*):$/.exec(code))) {
+      const value: MaskedValue | undefined = /^range\(/.test(m[2].trim()) ? { masked: '0', literals: [] } : undefined;
+      for (const name of targetNames(m[1])) {
+        const list = occurrences.get(name) ?? [];
+        list.push({ line: j, path: [...path, j], assigns: true, value });
+        occurrences.set(name, list);
+      }
+    }
     if (code.endsWith(':')) stack.push({ indent: l.indent, line: j });
   }
 
@@ -167,8 +176,18 @@ export function planHoistedLocals(lines: LogicalLine[], header: number, params: 
   const plan = new Map<number, HoistedLocal[]>();
   for (const [name, list] of occurrences) {
     if (skip.has(name) || !list[0].assigns || list[0].path.length === 0) continue;
-    const block = list[0].path[list[0].path.length - 1];
-    if (list.every((o) => o.path.includes(block))) continue;
+    // A use sees the latest assignment before it only if that assignment's block encloses it;
+    // otherwise (a closed block, a sibling branch) the value flows across Java scopes.
+    let last: Occurrence | undefined;
+    let crosses = false;
+    for (const o of list) {
+      if (o.assigns) last = o;
+      else if (!last || !last.path.every((h, k) => o.path[k] === h)) {
+        crosses = true;
+        break;
+      }
+    }
+    if (!crosses) continue;
     // Declare in the deepest block around every use, but never inside a loop body (the value
     // must survive iterations) nor directly in a `match` (a switch body holds only cases).
     let common = list[0].path;
@@ -179,7 +198,8 @@ export function planHoistedLocals(lines: LogicalLine[], header: number, params: 
     }
     const loop = common.findIndex((h) => LOOP.test(lines[h].text.trim()) || MATCH.test(lines[h].text.trim()));
     if (loop >= 0) common = common.slice(0, loop);
-    const before = chainStart(list[0].path[common.length]);
+    // Every use inside the first assignment's block: declare right before that assignment.
+    const before = common.length < list[0].path.length ? chainStart(list[0].path[common.length]) : list[0].line;
     const hoists = plan.get(before) ?? [];
     hoists.push({ name, values: list.filter((o) => o.assigns).map((o) => o.value) });
     plan.set(before, hoists);

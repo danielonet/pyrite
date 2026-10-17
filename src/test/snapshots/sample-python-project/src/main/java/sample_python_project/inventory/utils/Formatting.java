@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
+import pyrite.runtime.Py;
 import pyrite.runtime.Tuple;
 
 // python: from typing import Any, Callable, Iterable, Sequence
@@ -26,7 +27,7 @@ public final class Formatting {
         if (s.size() >= width) {
             return s.subList(0, width);
         }
-        return align == "left" ? s.ljust(width) : s.rjust(width);
+        return align == "left" ? Py.ljust(s, width) : Py.rjust(s, width);
     }
 
     /**
@@ -74,10 +75,10 @@ public final class Formatting {
     }
 
     public static String slugify(String text) {
-        var cleaned = String.join("", text.trim().stream().map(ch -> ch.isalnum() ? ch.toLowerCase() : "-"));
+        var cleaned = String.join("", text.trim().stream().map(ch -> Py.isalnum(ch) ? ch.toLowerCase() : "-"));
         while (cleaned.contains("--")) {
             cleaned = cleaned.replace("--", "-");
         }
-        return cleaned.strip("-");
+        return Py.strip(cleaned, "-");
     }
 }

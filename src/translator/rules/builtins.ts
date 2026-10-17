@@ -12,6 +12,8 @@ import { PLACEHOLDER_RE } from './strings';
 import { boxed, splitTopLevel, translateType } from './typeHints';
 
 export interface CallContext {
+  /** Java type of a plain name (`s`, `this.x`), when known. */
+  typeOf?: (name: string) => string | undefined;
   /** The Java-rendered literal behind a placeholder token, e.g. `"name"`, or undefined when unknown. */
   literal(maskedToken: string): string | undefined;
 }
@@ -95,7 +97,7 @@ function functionRef(f: string): string {
 }
 
 /** `key=f, reverse=True` -> a Comparator expression, or '' for the natural order. */
-function comparator(kw: Map<string, string>): string {
+export function comparator(kw: Map<string, string>): string {
   const key = kw.get('key');
   const reverse = kw.get('reverse') === 'true';
   if (key && reverse) return `Comparator.comparing(${functionRef(key)}).reversed()`;
@@ -113,7 +115,13 @@ function plainString(ctx: CallContext, token: string): string | undefined {
 
 const HANDLERS: Record<string, Handler> = {
   // A string literal has a length; anything else is taken for a collection.
-  len: ([a]) => (a ? `${paren(a)}.${PLACEHOLDER_ONLY.test(a.trim()) ? 'length' : 'size'}()` : undefined),
+  // A string has a length, an array a length field; anything else is taken for a collection.
+  len: ([a], _kw, ctx) => {
+    if (!a) return undefined;
+    const type = /^[\w.]+$/.test(a.trim()) ? ctx.typeOf?.(a.trim()) ?? '' : '';
+    if (/\[\]$/.test(type)) return `${a.trim()}.length`;
+    return `${paren(a)}.${PLACEHOLDER_ONLY.test(a.trim()) || /^String\b/.test(type) ? 'length' : 'size'}()`;
+  },
   sum: ([a], kw) => (a && !kw.size ? `${streamOf(a)}.mapToDouble(Number::doubleValue).sum()` : undefined),
   any: ([a]) => {
     if (!a) return undefined;

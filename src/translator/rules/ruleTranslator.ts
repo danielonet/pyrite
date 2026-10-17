@@ -28,6 +28,7 @@ import { applyImports, codeOnly, planImports, renderImports } from '../imports/j
 import { NullabilityScan, boxIfNullable, nullableType, scanNullability } from './nullability';
 import { UNDERSCORE_NAME, renameJavaReservedIdentifiers } from './javaNames';
 import { HoistedLocal, planHoistedLocals } from './scoping';
+import { typeFromUsage } from './usageTypes';
 import { RUNTIME_MODULES } from '../imports/pythonModules';
 
 type BlockKind = 'class' | 'def' | 'if' | 'for' | 'while' | 'try' | 'with' | 'match' | 'case' | 'main' | 'static' | 'other';
@@ -92,6 +93,39 @@ function importedRuntimeModules(lines: LogicalLine[]): Map<string, string> {
     }
   }
   return modules;
+}
+
+/** A function as a lambda: its parameters, functional interface and the method that calls it. */
+interface FunctionShape extends LocalFunction {
+  parsed: Array<{ star: string; name: string; def?: string }>;
+  iface: string;
+}
+
+/**
+ * The functional interface a function becomes as a lambda, by its shape: `Runnable`, `Supplier`,
+ * `Consumer`, `Function`, `BiConsumer`, `BiFunction`; three or more parameters, or `*args`, take
+ * one `Object[]`. `types` gives the parameters' Java types where known.
+ */
+function functionShape(rawParams: string[], ret: string, types: Map<string, string>): FunctionShape {
+  const parsed = rawParams
+    .filter((p) => p !== '*' && p !== '/')
+    .map((p) => /^(\*{0,2})(\w+)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.+))?$/.exec(p))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => ({ star: m[1], name: m[2], def: m[4] }));
+  const plain = (t: string | undefined) => boxed((t ?? 'Object').replace(/\s*\/\*.*?\*\//g, '').trim() || 'Object');
+  const isVoid = ret === 'void';
+  const r = plain(ret);
+  const arrayArgs = parsed.length >= 3 || parsed.some((p) => p.star);
+  let iface: string;
+  let method: string;
+  if (arrayArgs) [iface, method] = isVoid ? ['Consumer<Object[]>', 'accept'] : [`Function<Object[], ${r}>`, 'apply'];
+  else if (parsed.length === 0) [iface, method] = isVoid ? ['Runnable', 'run'] : [`Supplier<${r}>`, 'get'];
+  else {
+    const ps = parsed.map((p) => plain(types.get(p.name)));
+    if (parsed.length === 1) [iface, method] = isVoid ? [`Consumer<${ps[0]}>`, 'accept'] : [`Function<${ps[0]}, ${r}>`, 'apply'];
+    else [iface, method] = isVoid ? [`BiConsumer<${ps[0]}, ${ps[1]}>`, 'accept'] : [`BiFunction<${ps[0]}, ${ps[1]}, ${r}>`, 'apply'];
+  }
+  return { parsed, iface, method, arrayArgs };
 }
 
 /** The value a hoisted local starts with, by type (`null` for the rest). */
@@ -328,6 +362,14 @@ class RuleTranslation {
     this.lines = splitLogicalLines(input.source);
     renameJavaReservedIdentifiers(this.lines);
     this.pythonModules = importedRuntimeModules(this.lines);
+    for (const l of this.lines) {
+      const m = l.kind === 'code' ? /^import\s+(.+)$/.exec(l.text.trim()) : null;
+      for (const part of m ? m[1].split(',') : []) {
+        const [mod, alias] = part.trim().split(/\s+as\s+/);
+        this.importedModules.add(alias ?? mod.split('.')[0]);
+      }
+    }
+    this.moduleFunctions = this.moduleConditionalDefs();
     this.scan = scanMembers(this.lines);
     this.localKnown = toKnownMembers(this.scan);
     this.known = input.knownMembers;
@@ -404,10 +446,44 @@ class RuleTranslation {
 
   /** Local names bound to Python modules with a Java counterpart (`os`, `osp` -> `os.path`, ...). */
   private pythonModules: Map<string, string>;
+  /** Classes declared in this file (see `ExprContext.classNames`). */
+  private classNameSet?: Set<string>;
+  /** Names bound by `import x` / `import x as y`: modules, whose functions are not str/list methods. */
+  private importedModules = new Set<string>();
+  private classMethodCache = new Map<string, Set<string>>();
+
+  /** Java type of a plain name: a local or parameter, a `self.x` / `this.x` field, a module global. */
+  private nameType(name: string): string | undefined {
+    const field = /^(?:self|this)\.(\w+)$/.exec(name);
+    if (field) {
+      const cls = this.nearestClass()?.className;
+      return cls ? this.scan.classes.get(cls)?.fields.get(field[1]) : undefined;
+    }
+    if (!/^\w+$/.test(name)) return undefined;
+    return this.enclosingScope()?.types?.get(name) ?? this.scan.moduleTypes.get(name);
+  }
+
+  /** Method names a class of this file defines (Python names), for `this.x()` calls. */
+  private classMethodsOf(className: string | undefined): Set<string> | undefined {
+    if (!className) return undefined;
+    let methods = this.classMethodCache.get(className);
+    if (!methods) {
+      methods = this.scan.classes.get(className)?.methodNames ?? new Set();
+      this.classMethodCache.set(className, methods);
+    }
+    return methods;
+  }
+
+  /** Functions defined under a module-level `if`/`try`: static fields holding a lambda, by name. */
+  private moduleFunctions = new Map<string, FunctionShape>();
 
   private exprCtx(literals?: string[], valueContext = false): ExprContext {
     return {
       modules: this.pythonModules,
+      classNames: (this.classNameSet ??= new Set(this.scan.classes.keys())),
+      importedModules: this.importedModules,
+      classMethods: this.classMethodsOf(this.nearestClass()?.className),
+      typeOf: (name) => this.nameType(name),
       className: this.nearestClass()?.className,
       literals,
       valueContext,
@@ -609,9 +685,39 @@ class RuleTranslation {
     this.emit(this.generatorReturn(block), 0, this.depth + 1);
   }
 
-  /** Nested functions visible here (from every enclosing function scope), or undefined. */
+  /**
+   * Functions defined under a module-level `if`, `try` or `with` (platform switches, optional
+   * imports): Java cannot define a method conditionally, so each is a static field of the module
+   * class holding a lambda, assigned in the static block. Found before translating, so that calls
+   * anywhere in the file (`f(x)` -> `f.apply(x)`) go through the field. The first definition of a
+   * name sets its shape.
+   */
+  private moduleConditionalDefs(): Map<string, FunctionShape> {
+    const found = new Map<string, FunctionShape>();
+    const open: LogicalLine[] = [];
+    this.lines.forEach((l, i) => {
+      if (l.kind !== 'code') return;
+      while (open.length && open[open.length - 1].indent >= l.indent) open.pop();
+      const m = /^(?:async\s+)?def\s+(\w+)\s*(?:\[[^\]]*\])?\s*\((.*)\)\s*(?:->\s*(.+?))?\s*:/.exec(l.text);
+      const compound = open.length > 0 && open[0].indent === 0 && open.every((b) => !/^(?:async\s+)?(def|class)\s/.test(b.text));
+      if (m && compound && !found.has(m[1])) {
+        const ret = m[3] ? translateType(m[3]) : this.inferReturnType(i);
+        const rawParams = splitTopLevel(m[2]).map((p) => p.trim()).filter(Boolean);
+        const types = new Map<string, string>();
+        for (const p of rawParams) {
+          const hint = /^(\w+)\s*:\s*([^=]+?)\s*(?:=.*)?$/.exec(p);
+          if (hint) types.set(hint[1], translateType(hint[2]));
+        }
+        found.set(m[1], functionShape(rawParams, ret, types));
+      }
+      if (/:\s*(#.*)?$/.test(l.text)) open.push(l);
+    });
+    return found;
+  }
+
+  /** Nested functions visible here (from every enclosing function scope, and the module's conditional defs), or undefined. */
   private localFunctionsInScope(): Map<string, LocalFunction> | undefined {
-    let all: Map<string, LocalFunction> | undefined;
+    let all: Map<string, LocalFunction> | undefined = this.moduleFunctions.size ? new Map(this.moduleFunctions) : undefined;
     for (const b of this.stack) {
       if (!b.localFunctions?.size) continue;
       all ??= new Map();
@@ -1515,6 +1621,8 @@ class RuleTranslation {
       const [, pname, hint, def] = parsed;
       declared.add(pname);
       let type = hint ? translateType(hint) : def ? typeFromDefault(def) : 'Object';
+      // No hint and no telling default: what the body does with it (`p.split()` -> String).
+      if (type === 'Object' && (def === undefined || def.trim() === 'None')) type = typeFromUsage(pname, this.ownBodyCode(i)) ?? 'Object';
       if (def !== undefined && def.trim() === 'None') type = nullableType(type);
       else type = boxIfNullable(type, nullability.names.has(pname));
       params.push(def !== undefined ? `${type} ${pname} /* = ${this.expr(def)} */` : `${type} ${pname}`);
@@ -1604,33 +1712,22 @@ class RuleTranslation {
    */
   private translateNestedDef(line: LogicalLine, name: string, rawParams: string[], ret: string, declared: Set<string>, types: Map<string, string>, nullability: NullabilityScan, enclosing: Block, comment: string): void {
     const py = line.startLine;
-    const parsed = rawParams
-      .filter((p) => p !== '*' && p !== '/')
-      .map((p) => /^(\*{0,2})(\w+)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.+))?$/.exec(p))
-      .filter((m): m is RegExpExecArray => m !== null)
-      .map((m) => ({ star: m[1], name: m[2], def: m[4] }));
-    const plain = (t: string | undefined) => boxed((t ?? 'Object').replace(/\s*\/\*.*?\*\//g, '').trim() || 'Object');
-    const isVoid = ret === 'void';
-    const r = plain(ret);
-    const arrayArgs = parsed.length >= 3 || parsed.some((p) => p.star);
-    let iface: string;
-    let method: string;
-    if (arrayArgs) [iface, method] = isVoid ? ['Consumer<Object[]>', 'accept'] : [`Function<Object[], ${r}>`, 'apply'];
-    else if (parsed.length === 0) [iface, method] = isVoid ? ['Runnable', 'run'] : [`Supplier<${r}>`, 'get'];
-    else {
-      const ps = parsed.map((p) => plain(types.get(p.name)));
-      if (parsed.length === 1) [iface, method] = isVoid ? [`Consumer<${ps[0]}>`, 'accept'] : [`Function<${ps[0]}, ${r}>`, 'apply'];
-      else [iface, method] = isVoid ? [`BiConsumer<${ps[0]}, ${ps[1]}>`, 'accept'] : [`BiFunction<${ps[0]}, ${ps[1]}, ${r}>`, 'apply'];
+    // A def under a module-level `if`/`try` is a static field (see `moduleConditionalDefs`).
+    const moduleLevel = enclosing.kind === 'static' ? this.moduleFunctions.get(name) : undefined;
+    const { parsed, iface, method, arrayArgs } = moduleLevel ?? functionShape(rawParams, ret, types);
+    if (moduleLevel) {
+      this.assignInStaticBlock(enclosing, name, iface, undefined, py, '');
+    } else {
+      // Registered before the body, so the enclosing function (and recursive calls) call it right.
+      enclosing.localFunctions ??= new Map();
+      enclosing.localFunctions.set(name, { method, arrayArgs });
+      this.declareLocal(name);
     }
-    // Registered before the body, so the enclosing function (and recursive calls) call it right.
-    enclosing.localFunctions ??= new Map();
-    enclosing.localFunctions.set(name, { method, arrayArgs });
-    enclosing.declared?.add(name);
 
     const argv = parsed.some((p) => p.name === 'argv') ? 'argv_' : 'argv';
     const lambdaParams = arrayArgs ? `(Object[] ${argv})` : `(${parsed.map((p) => p.name).join(', ')})`;
     const defaults = !arrayArgs && parsed.some((p) => p.def !== undefined) ? '; defaults are not applied, callers pass every argument' : '';
-    this.emit(`${iface} ${name} = ${lambdaParams} -> { // nested function${defaults}${comment}`, py);
+    this.emit(`${moduleLevel ? '' : `${iface} `}${name} = ${lambdaParams} -> { // ${moduleLevel ? 'defined conditionally' : 'nested function'}${defaults}${comment}`, py);
     this.recordSymbol(name, 'method', py);
     this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability, closer: '};' });
     if (!arrayArgs) return;
@@ -1743,7 +1840,6 @@ class RuleTranslation {
     const scope = this.enclosingScope();
     const declared = scope?.declared;
     const declaredBefore = new Set(targets.filter((t) => declared?.has(t)));
-    targets.forEach((t) => declared?.add(t));
     // Element type from the iterable's type: List<Order> -> Order, Map<K, V>.items() -> K, V.
     const iterMasked = maskedIterable.trim();
     const view = /\.(items|values|keys)\(\)$/.exec(iterMasked)?.[1];
@@ -1754,14 +1850,22 @@ class RuleTranslation {
       if (type) scope?.types?.set(name, type);
       return `${type ?? 'var'} ${name}`;
     };
+    // The loop's block: what it declares goes out of scope (and out of `declared`) when it closes.
+    const open = (header: string) => {
+      this.emit(`${header} {${asyncNote}${comment}`, py);
+      this.stack.push({ indent: line.indent, kind: 'for', blockLocals: [] });
+    };
+    // A loop variable already in scope (assigned before, or used after the loop and so declared
+    // ahead) cannot be declared again: the loop walks a fresh variable and assigns it.
+    const bind = (name: string, value: string, type: string | undefined) => this.bindLoopTarget(name, value, typed, type, lits, py, declaredBefore);
     let m: RegExpExecArray | null;
 
     if ((m = /^range\((.*)\)$/.exec(iterable.trim())) && targets.length === 1) {
       const args = splitTopLevel(m[1]).map((a) => this.expr(a));
-      const v = targets[0] === UNDERSCORE_NAME ? this.unusedLoopName(line, scope) : targets[0];
-      scope?.declared?.add(v);
+      const target0 = targets[0] === UNDERSCORE_NAME ? this.unusedLoopName(line, scope) : targets[0];
+      const reuse = declaredBefore.has(target0);
+      const v = reuse ? this.freeLocalName(target0) : target0;
       let header: string;
-      scope?.types?.set(v, 'int');
       if (args.length === 1) header = `for (int ${v} = 0; ${v} < ${args[0]}; ${v}++)`;
       else if (args.length === 2) header = `for (int ${v} = ${args[0]}; ${v} < ${args[1]}; ${v}++)`;
       else {
@@ -1769,8 +1873,12 @@ class RuleTranslation {
         const down = step.startsWith('-');
         header = `for (int ${v} = ${args[0]}; ${v} ${down ? '>' : '<'} ${args[1]}; ${v} ${down ? '-=' : '+='} ${down ? step.slice(1) : step})`;
       }
-      this.emit(`${header} {${asyncNote}${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'for' });
+      open(header);
+      if (reuse) this.emit(`${target0} = ${v};`, py);
+      else {
+        scope?.types?.set(v, 'int');
+        this.declareLocal(v);
+      }
       return;
     }
     if ((m = /^enumerate\((.*)\)$/.exec(iterable.trim())) && targets.length === 2) {
@@ -1780,60 +1888,88 @@ class RuleTranslation {
       const [idx, item] = targets;
       const simple = /^[\w.]+$/.test(coll);
       if (simple) {
-        scope?.types?.set(idx, 'int');
         const itemType = elementTypeOf(this.typeOf(args[0].trim(), lits));
-        this.emit(`for (int ${idx} = ${start}; ${idx} < ${coll}.size()${start !== '0' ? ` + ${start}` : ''}; ${idx}++) {${asyncNote}${comment}`, py);
-        this.stack.push({ indent: line.indent, kind: 'for' });
-        this.bindLoopTarget(item, `${coll}.get(${idx}${start !== '0' ? ` - ${start}` : ''})`, typed, itemType, lits, py);
+        const reuse = declaredBefore.has(idx);
+        const i = reuse ? this.freeLocalName(idx) : idx;
+        open(`for (int ${i} = ${start}; ${i} < ${coll}.size()${start !== '0' ? ` + ${start}` : ''}; ${i}++)`);
+        if (reuse) this.emit(`${idx} = ${i};`, py);
+        else {
+          scope?.types?.set(idx, 'int');
+          this.declareLocal(idx);
+        }
+        bind(item, `${coll}.get(${i}${start !== '0' ? ` - ${start}` : ''})`, itemType);
         return;
       }
     }
     if (/\.items\(\)$/.test(iterable.trim()) && targets.length === 2) {
       const mapExpr = this.expr(iterable.trim().replace(/\.items\(\)$/, ''));
       const [k, v] = targets;
-      this.emit(`for (var entry : ${mapExpr}.entrySet()) {${asyncNote}${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'for' });
-      this.bindLoopTarget(k, 'entry.getKey()', typed, mapTypes?.[0], lits, py);
-      this.bindLoopTarget(v, 'entry.getValue()', typed, mapTypes?.[1], lits, py);
+      const entry = this.freeLocalName('entry');
+      open(`for (var ${entry} : ${mapExpr}.entrySet())`);
+      bind(k, `${entry}.getKey()`, mapTypes?.[0]);
+      bind(v, `${entry}.getValue()`, mapTypes?.[1]);
       return;
     }
     if ((m = /^zip\((.*)\)$/.exec(iterable.trim())) && targets.length >= 2) {
       const colls = splitTopLevel(m[1]).map((a) => this.expr(a));
       if (colls.every((c) => /^[\w.]+$/.test(c)) && colls.length === targets.length) {
-        this.emit(`for (int i = 0; i < ${colls[0]}.size(); i++) { // zip${asyncNote}${comment}`, py);
-        this.stack.push({ indent: line.indent, kind: 'for' });
-        targets.forEach((t, k) => this.emit(`var ${t} = ${colls[k]}.get(i);`, py));
+        const i = this.freeLocalName('i');
+        this.emit(`for (int ${i} = 0; ${i} < ${colls[0]}.size(); ${i}++) { // zip${asyncNote}${comment}`, py);
+        this.stack.push({ indent: line.indent, kind: 'for', blockLocals: [] });
+        targets.forEach((t, k) => bind(t, `${colls[k]}.get(${i})`, undefined));
         return;
       }
     }
     // Iterating a Map in Python walks its keys.
     // A tuple literal walked by a loop is a plain collection: `for x in (a, b)` -> List.of(a, b).
-    const iter = this.expr(iterable).replace(/^Tuple\.of\(/, 'List.of(') + (mapTypes && !view ? '.keySet()' : '');
+    let iter = this.expr(iterable).replace(/^Tuple\.of\(/, 'List.of(') + (mapTypes && !view ? '.keySet()' : '');
+    // A string walks its characters.
+    if (/^String\b/.test(this.nameType(iterable.trim()) ?? '')) iter = `Py.chars(${iter})`;
     if (targets.length === 1) {
-      this.emit(`for (${typed(targets[0], elem)} : ${iter}) {${asyncNote}${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'for' });
+      if (declaredBefore.has(targets[0])) {
+        const item = this.freeLocalName('item');
+        open(`for (var ${item} : ${iter})`);
+        this.emit(`${targets[0]} = ${item};`, py);
+      } else {
+        open(`for (${typed(targets[0], elem)} : ${iter})`);
+        this.declareLocal(targets[0]);
+      }
       return;
     }
     const unpack = unpackTargets(target);
     if (!unpack) {
-      this.emit(`for (var (${targets.join(', ')}) : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
-      this.stack.push({ indent: line.indent, kind: 'for' });
+      open(`for (var (${targets.join(', ')}) : ${iter})`);
       return;
     }
     // `for a, b in pairs:` walks the tuples and unpacks each one at the top of the body.
-    for (const t of boundNames(unpack)) if (!declaredBefore.has(t)) declared?.delete(t);
     const item = this.freeLocalName('item');
     this.emit(`for (var ${item} : ${iter}) { // tuple unpacking${asyncNote}${comment}`, py);
-    const blockLocals = boundNames(unpack).filter((t) => /^\w+$/.test(t) && !declaredBefore.has(t));
-    this.stack.push({ indent: line.indent, kind: 'for', blockLocals });
+    this.stack.push({ indent: line.indent, kind: 'for', blockLocals: [] });
     for (const l of this.unpackingLines(unpack, item, lits)) this.emit(l, py);
   }
 
   /** `name = value;` at the top of a loop body; a nested target (`(a, b)`) is unpacked from it. */
-  private bindLoopTarget(name: string, value: string, typed: (n: string, t: string | undefined) => string, type: string | undefined, lits: string[], py: number): void {
+  private bindLoopTarget(name: string, value: string, typed: (n: string, t: string | undefined) => string, type: string | undefined, lits: string[], py: number, declaredBefore: Set<string>): void {
     const nested = /^[(\[]/.test(name) ? unpackTargets(name) : undefined;
     if (nested) for (const l of this.unpackingLines(nested, value, lits)) this.emit(l, py);
-    else this.emit(`${typed(name, type)} = ${value};`, py);
+    else if (declaredBefore.has(name)) this.emit(`${name} = ${value};`, py);
+    else {
+      this.emit(`${typed(name, type)} = ${value};`, py);
+      this.declareLocal(name);
+    }
+  }
+
+  /**
+   * Record a local the statement being emitted declares: it is in scope (in `declared`) until
+   * the innermost open block closes, as a Java local is. Locals of the function body itself
+   * last until the function ends.
+   */
+  private declareLocal(name: string): void {
+    const scope = this.enclosingScope();
+    if (!scope?.declared) return;
+    scope.declared.add(name);
+    const block = this.top();
+    if (block && block !== scope && block.kind !== 'class' && block.kind !== 'static') (block.blockLocals ??= []).push(name);
   }
 
   /**
@@ -1859,16 +1995,16 @@ class RuleTranslation {
   private translateWith(line: LogicalLine, itemsText: string, lits: string[], isAsync: boolean, comment: string): void {
     const py = line.startLine;
     const items = splitTopLevel(stripOuterParens(itemsText));
-    const declared = this.enclosingScope()?.declared;
     const asyncNote = isAsync ? ' /* async with */' : '';
     const resources: string[] = [];
+    const bound: string[] = [];
     let counter = 0;
     let allBare = true;
     for (const item of items) {
       const m = /^(.+?)\s+as\s+(\w+)$/.exec(item.trim());
       if (m) {
         allBare = false;
-        declared?.add(m[2]);
+        bound.push(m[2]);
         resources.push(`var ${m[2]} = ${unmaskStrings(translateMaskedExpression(m[1], this.exprCtx(lits)), lits)}`);
       } else {
         const ctx = unmaskStrings(translateMaskedExpression(item.trim(), this.exprCtx(lits)), lits);
@@ -1887,6 +2023,8 @@ class RuleTranslation {
       this.emit(`try (${res.join('; ')}) { // with${allBare ? ': context manager' : ''}${asyncNote}${comment}`, py);
     }
     this.stack.push({ indent: line.indent, kind: 'with' });
+    // A resource lives in the try block.
+    for (const name of bound) this.declareLocal(name);
   }
 
   // -------------------------------------------------------- simple statements
@@ -2219,7 +2357,7 @@ class RuleTranslation {
     const declared = this.enclosingScope()?.declared;
     let name = base;
     for (let n = 2; declared?.has(name) || this.scan.moduleTypes.has(name); n += 1) name = `${base}${n}`;
-    declared?.add(name);
+    this.declareLocal(name);
     return name;
   }
 
@@ -2305,9 +2443,8 @@ class RuleTranslation {
       const setter = attr ? this.propertySetter(attr[2]) : undefined;
       return attr && setter ? `${ex(attr[1])}.${setter}(${value});` : `${ex(target)} = ${value};`;
     }
-    const declared = this.enclosingScope()?.declared;
-    if (declared?.has(target)) return `${target} = ${value};`;
-    declared?.add(target);
+    if (this.enclosingScope()?.declared?.has(target)) return `${target} = ${value};`;
+    this.declareLocal(target);
     return `var ${target} = ${value};`;
   }
 
@@ -2374,7 +2511,7 @@ class RuleTranslation {
       const types = h.values.map((v) => (v ? this.inferValueType(v.masked, v.literals) : 'Object'));
       let type = types.every((t) => t === types[0]) && !/^var$|\/\*/.test(types[0]) ? types[0] : 'Object';
       type = boxIfNullable(type, fn!.nullability?.names.has(h.name) === true);
-      fn!.declared?.add(h.name);
+      this.declareLocal(h.name);
       if (type !== 'Object') fn!.types?.set(h.name, type);
       this.emit(`${type} ${h.name} = ${DEFAULT_VALUES[type] ?? 'null'};`, py);
     }
@@ -2416,7 +2553,7 @@ class RuleTranslation {
     if (declared.has(name)) {
       this.emit(`${name}${rhs};${comment}`, py);
     } else {
-      declared.add(name);
+      this.declareLocal(name);
       let t = type === 'Object' ? 'var' : type;
       const mayBeNone = valueJava === 'null' || scope.nullability?.names.has(name) === true;
       // `x = None` now, a literal later: declare it with the later type, boxed (`Integer x = null`).

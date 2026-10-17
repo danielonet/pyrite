@@ -76,7 +76,7 @@ test('expressions: comprehensions become streams', () => {
   assert.equal(translateExpression('[p.name for p in products if p.active]'), 'products.stream().filter(p -> p.active).map(p -> p.name).toList()');
   assert.equal(translateExpression('{o.id: o for o in orders}'), 'orders.stream().collect(Collectors.toMap(o -> o.id, o -> o))');
   assert.equal(translateExpression('sum(x * 2 for x in xs)'), 'xs.stream().map(x -> x * 2).mapToDouble(Number::doubleValue).sum()');
-  assert.equal(translateExpression('"".join(c.lower() if c.isalnum() else "-" for c in text)'), 'String.join("", text.stream().map(c -> c.isalnum() ? c.toLowerCase() : "-"))');
+  assert.equal(translateExpression('"".join(c.lower() if c.isalnum() else "-" for c in text)'), 'String.join("", text.stream().map(c -> Py.isalnum(c) ? c.toLowerCase() : "-"))');
 });
 
 test('strings are never rewritten', () => {
@@ -228,7 +228,8 @@ def f(items, d):
   contains(out, '} else if (i == 1) {');
   contains(out, '} else {');
   contains(out, 'for (var entry : d.entrySet()) {');
-  contains(out, 'var k = entry.getKey();');
+  // `d.items()` makes `d` a Map (from its use), so the key is a String.
+  contains(out, 'String k = entry.getKey();');
   contains(out, 'try {');
   contains(out, '} catch (NoSuchElementException | IllegalArgumentException e) {');
   contains(out, 'throw new RuntimeException("boom"); // caused by e');
@@ -1654,7 +1655,7 @@ def f(pair, xs, d, o):
   contains(out, 'var rest = xs.subList(1, xs.size());');
   contains(out, 'var init = xs.subList(0, xs.size() - 1);');
   contains(out, 'var last = xs.get(xs.size() - 1);');
-  contains(out, 'var tuple2 = o.split("."); // tuple unpacking\n        var v = tuple2.get(0);\n        var w = tuple2.get(2);');
+  contains(out, 'var tuple2 = Py.split(o, "."); // tuple unpacking\n        var v = tuple2.get(0);\n        var w = tuple2.get(2);');
   contains(out, 'd.put("k", tuple3.get(0));');
   contains(out, 'var s = 1;\n        var t = 2;');
 });
@@ -2086,7 +2087,7 @@ def plain(yielded, name):
 `);
   contains(out, 'public static List<Object> evens(Object xs) {\n        List<Object> yielded = new ArrayList<>(); // generator, collected eagerly');
   contains(out, '                yielded.add(x);\n            }\n        }\n        return yielded;\n    }');
-  contains(out, 'public static Iterator<Integer> pairs(Object d) {');
+  contains(out, 'public static Iterator<Integer> pairs(Map<String, Object> d) {');
   contains(out, '            return yielded.iterator();\n        }');
   contains(out, 'yielded.add(Tuple.of(k, v));');
   contains(out, 'yielded.addAll((d.stream()).toList());\n        return yielded.iterator();');
@@ -2208,7 +2209,7 @@ def f(items, done: bool, params, node, flags, d, s, it, p):
   contains(out, 'if (!Py.truthy(params) || List.of(1, 2).contains(params.get(0))) {');
   contains(out, 'if (!(node instanceof Constant) || Py.truthy(flags & 4)) {');
   contains(out, 'if (Py.truthy(d.get("k")) && s.startsWith("x")) {');
-  contains(out, 'if (is_valid(s) && it.has_next() && p.chars().allMatch(Character::isDigit)) {');
+  contains(out, 'if (is_valid(s) && it.has_next() && Py.isdigit(p)) {');
   contains(out, 'import pyrite.runtime.Py;');
 });
 
@@ -2264,4 +2265,159 @@ test('runtime library: a view that uses it gets its sources in the project, writ
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('scoping: declarations follow Java blocks; loop targets used after the loop are declared ahead', () => {
+  const out = java(`
+def f(xs, ok, n):
+    if ok:
+        tmp = 1
+        print(tmp)
+    else:
+        tmp = 2
+        print(tmp)
+    for x in xs:
+        if x:
+            break
+    print(x)
+    for i in range(n):
+        pass
+    print(i)
+    for j in range(3):
+        pass
+    for j in range(4):
+        print(j)
+    y = 0
+    for y in xs:
+        pass
+    return y
+`);
+  // Each branch has its own local: nothing flows between them.
+  contains(out, '            int tmp = 1;\n            System.out.println(tmp);\n        } else {\n            int tmp = 2;');
+  contains(out, '        Object x = null;\n        for (var item : xs) {\n            x = item;');
+  contains(out, '        int i = 0;\n        for (int i2 = 0; i2 < n; i2++) {\n            i = i2;');
+  // Each loop assigns j before using it: no declaration ahead.
+  contains(out, '        for (int j = 0; j < 3; j++) {');
+  contains(out, '        for (int j = 0; j < 4; j++) {');
+  contains(out, '        int y = 0;\n        for (var item2 : xs) {\n            y = item2;');
+});
+
+test('builtin values: NotImplemented, Ellipsis, warning categories and classes used as values', () => {
+  const out = java(`
+import warnings
+
+class Order:
+    def __eq__(self, other):
+        if not isinstance(other, Order):
+            return NotImplemented
+        return self.id == other.id
+
+    @classmethod
+    def check(cls, C):
+        return cls is Order
+
+def f(x=...):
+    warnings.warn("old", DeprecationWarning, stacklevel=2)
+    try:
+        pass
+    except DeprecationWarning:
+        raise UserWarning("x")
+    kinds = {Order: 1}
+    return x is ...
+`);
+  contains(out, 'return Py.NotImplemented;');
+  contains(out, 'if (!(other instanceof Order)) {');
+  contains(out, 'return Order.class == Order.class;');
+  contains(out, 'Warnings.warn("old", Warnings.DeprecationWarning.class, /* stacklevel = */ 2);');
+  contains(out, '} catch (Warnings.DeprecationWarning ignored) {');
+  contains(out, 'throw new Warnings.UserWarning("x");');
+  contains(out, 'Map.of(Order.class, 1)');
+  contains(out, 'return x == Py.Ellipsis;');
+});
+
+test('conditional module defs: a static field holding a lambda, called through it everywhere', () => {
+  const out = java(`
+import sys
+
+def use(x):
+    return _norm(x) + str(_helper())
+
+if sys.platform == "win32":
+    def _norm(p):
+        return p.lower()
+else:
+    def _norm(p):
+        return p
+
+try:
+    from _speedups import _helper
+except ImportError:
+    def _helper():
+        return 1
+`);
+  contains(out, 'return _norm.apply(x) + String.valueOf(_helper.get());');
+  contains(out, '    static Function<Object, Object> _norm;\n    static Supplier<Object> _helper;\n    static {');
+  contains(out, '            _norm = (p) -> { // defined conditionally\n                return p.toLowerCase();\n            };\n        } else {\n            _norm = (p) -> {');
+  contains(out, '            _helper = () -> { // defined conditionally');
+});
+
+test('types from usage: an unhinted parameter used only as a list, a string or a dict gets that type', () => {
+  const out = java(`
+def f(lines, text, opts, other):
+    lines.append(1)
+    first = lines[0]
+    parts = text.strip().split(",")
+    for k, v in opts.items():
+        print(k)
+    other.append(1)
+    other.name = 2
+`);
+  contains(out, 'f(List<Object> lines, String text, Map<String, Object> opts, Object other)');
+});
+
+test('python-only methods go through the runtime; known strings and dicts use their Java API', () => {
+  const out = java(`
+import shlex
+
+class Stack:
+    def pop(self):
+        return 1
+
+    def f(self, line: str, xs: list, d: dict, words):
+        a = line.split()
+        b = line.split(",", 1)
+        c = line.rstrip("\\n") + line.rstrip() + line.strip()
+        k, sep, v = line.partition("=")
+        n = xs.pop()
+        xs.remove(3)
+        xs.sort()
+        words.sort(key=len, reverse=True)
+        ok = line.isdigit()
+        p = shlex.split(line)
+        q = self.pop()
+        first = line[0] + line[-1] + line[1:-1]
+        size = len(line) + len(d)
+        if "x" in d:
+            pass
+        for ch in line:
+            print(ch)
+`);
+  contains(out, 'var a = Py.split(line);');
+  contains(out, 'var b = Py.split(line, ",", 1);');
+  contains(out, 'var c = Py.rstrip(line, "\\n") + line.stripTrailing() + line.trim();');
+  contains(out, 'var tuple = Py.partition(line, "=");');
+  contains(out, 'var n = Py.pop(xs);');
+  contains(out, 'Py.remove(xs, 3);');
+  contains(out, 'xs.sort(null);');
+  contains(out, 'words.sort(Comparator.comparing(v -> v.size()).reversed());');
+  contains(out, 'var ok = Py.isdigit(line);');
+  // A module function and the class's own method are left alone.
+  contains(out, 'var p = shlex.split(line);');
+  contains(out, 'var q = this.pop();');
+  contains(out, 'var first = String.valueOf(line.charAt(0)) + String.valueOf(line.charAt(line.length() - 1))');
+  contains(out, '+ Py.slice(line, 1, -1);');
+  contains(out, 'var size = line.length() + d.size();');
+  contains(out, 'if (d.containsKey("x")) {');
+  contains(out, 'for (var ch : Py.chars(line)) {');
+  contains(out, 'Map<?, ?> d');
 });

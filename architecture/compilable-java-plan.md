@@ -215,6 +215,20 @@ javac errors 34,629 -> 26,384. Largest left: unknown names 6,269 (Python builtin
 methods called on `Object` 5,663 and type mismatches 2,973 (0.2 types), unknown methods 2,882,
 module members the runtime lacks 2,702, call arity 1,941.
 
+Next round: declarations are block-scoped in the translator too (`declareLocal`), loop targets
+used after their loop are hoisted, `NotImplemented` / `...` / warning categories / classes as
+values, conditional module defs are static fields (the gap noted under 1.5), parameter types
+from usage, Python-only `str`/`list` methods through `Py`, and type-directed string/dict
+operations where the receiver's type is known. javac errors 26,384 -> 25,214.
+
+What is left is dominated by values of unknown type: methods called on `Object` (5,207), type
+mismatches (3,265) and field reads on `Object` (about 2,600 of the unknown names). Local
+inference cannot reach them (unhinted parameters of public functions, values from other
+modules). The choice left open: route operations on unknown types through runtime helpers
+(`Py.len(x)`, `Py.getitem(x, i)`, `Py.getattr(x, "name")`, `Py.call(x, "m", ...)`), which compiles
+but reads as reflection, or keep the readable form and accept the errors until 0.2 / 0.4 give
+more types (call-site analysis across the project).
+
 Every item here produced a javac syntax error. Add a parse gate: run the Java output
 through a Java parser (tree-sitter-java or `javac -proc:none` on the single file). On
 failure, **degrade the offending statement** to a compile-safe stub

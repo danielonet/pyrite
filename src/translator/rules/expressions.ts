@@ -7,7 +7,7 @@
 
 import { PLACEHOLDER_RE, SIMPLE_OPERAND, maskStrings, setFStringExpressionHook, unmaskStrings } from './strings';
 import { splitTopLevel } from './typeHints';
-import { rewriteBuiltinCalls, rewriteOrFallback, streamOf } from './builtins';
+import { comparator, rewriteBuiltinCalls, rewriteOrFallback, streamOf } from './builtins';
 import { MATH_MEMBERS, RUNTIME_MODULES, mathLog } from '../imports/pythonModules';
 import { rewriteIntLiterals } from './numbers';
 
@@ -26,6 +26,14 @@ export interface ExprContext {
   localFunctions?: Map<string, LocalFunction>;
   /** Local names bound to Python modules with a Java counterpart: `os` -> `os`, `osp` -> `os.path`. */
   modules?: Map<string, string>;
+  /** Classes declared in this file: used as a value, a class is `Name.class`. */
+  classNames?: Set<string>;
+  /** Names bound by `import x` (modules): `shlex.split(s)` is a module function, not `str.split`. */
+  importedModules?: Set<string>;
+  /** Methods the enclosing class defines: `this.pop()` calls its own method, not `list.pop`. */
+  classMethods?: Set<string>;
+  /** Java type of a local, parameter, `self.x` / `this.x` field or module global, when known. */
+  typeOf?: (name: string) => string | undefined;
 }
 
 /** How a nested function, translated to a lambda, is called. */
@@ -222,6 +230,8 @@ export const EXCEPTIONS: Record<string, string> = {
 };
 
 export function mapExceptionName(name: string): string {
+  // `except DeprecationWarning:`, `class MyWarning(UserWarning)`: the runtime's warning classes.
+  if (WARNING_CATEGORIES.has(name)) return `Warnings.${name}`;
   return EXCEPTIONS[name] ?? name;
 }
 
@@ -339,10 +349,12 @@ function comprehensionStream(clauses: CompClause[], elem: string, used: string, 
 }
 
 /** A list/set/dict comprehension or generator expression (the inside of `kind` brackets) as a stream, or undefined. */
-function comprehension(inner: string, kind: string): string | undefined {
+function comprehension(inner: string, kind: string, typeOf?: (name: string) => string | undefined): string | undefined {
   const comp = parseComprehension(inner);
   if (!comp) return undefined;
-  const { elem, clauses } = comp;
+  const { elem } = comp;
+  // A string walks its characters.
+  const clauses = comp.clauses.map((c) => (/^String\b/.test(typeOf?.(c.iter) ?? '') ? { ...c, iter: `Py.chars(${c.iter})` } : c));
   if (kind === '[') return `${comprehensionStream(clauses, elem, inner, false)}.toList()`;
   if (kind === '(') return `(${comprehensionStream(clauses, elem, inner, false)})`;
   if (indexAtDepth0(elem, /:/) < 0) return `${comprehensionStream(clauses, elem, inner, false)}.collect(Collectors.toSet())`;
@@ -365,7 +377,7 @@ function comprehension(inner: string, kind: string): string | undefined {
  *   [v for (k, v) in d.items()]        -> d.items().stream().map(item -> item.getValue()).toList()
  *   [x * y for x in xs for y in ys]    -> xs.stream().flatMap(x -> ys.stream().map(y -> x * y)).toList()
  */
-function rewriteComprehensions(text: string): string {
+function rewriteComprehensions(text: string, typeOf?: (name: string) => string | undefined): string {
   // Every comprehension has ` for `; most expressions are done here.
   if (!/\sfor\s/.test(text)) return text;
   let out = '';
@@ -382,8 +394,8 @@ function rewriteComprehensions(text: string): string {
       out += text.slice(i);
       break;
     }
-    const inner = rewriteComprehensions(text.slice(i + 1, end - 1));
-    out += comprehension(inner, ch) ?? `${ch}${inner}${text[end - 1]}`;
+    const inner = rewriteComprehensions(text.slice(i + 1, end - 1), typeOf);
+    out += comprehension(inner, ch, typeOf) ?? `${ch}${inner}${text[end - 1]}`;
     i = end;
   }
   return out;
@@ -704,7 +716,7 @@ export function sliceBound(recv: string, bound: string, dflt: string): string {
   return neg ? `${recv}.size() - ${neg[1]}` : bound;
 }
 
-function rewriteBrackets(text: string): string {
+function rewriteBrackets(text: string, typeOf?: (name: string) => string | undefined): string {
   let out = '';
   let i = 0;
   while (i < text.length) {
@@ -728,7 +740,7 @@ function rewriteBrackets(text: string): string {
       out += text.slice(i);
       break;
     }
-    const inner = rewriteBrackets(text.slice(i + 1, j));
+    const inner = rewriteBrackets(text.slice(i + 1, j), typeOf);
     const prevChar = out.replace(/\s+$/, '').slice(-1);
     // `x in [a, b]`, `return [a]`: a keyword before `[` starts a list, it is not a subscripted name.
     const afterKeyword = /(?:^|[^\w.])(?:in|not|and|or|is|if|else|return|yield|lambda|await|assert|del|from)\s*$/.test(out);
@@ -740,8 +752,19 @@ function rewriteBrackets(text: string): string {
       // Type hints such as List[int] look like subscripts on capitalized names - leave them alone.
       const receiverMatch = /([\w.]+|\))\s*$/.exec(out);
       const receiver = receiverMatch ? receiverMatch[1] : '';
+      const isString = /^[\w.]+$/.test(receiver) && /^String\b/.test(typeOf?.(receiver) ?? '');
       if (/^[A-Z]\w*$/.test(receiver) && /[a-z]/.test(receiver) && !/^(list|dict|set|tuple|type)$/i.test(receiver) && looksLikeTypeArgs(receiver, inner)) {
         out += `<${inner}>`;
+      } else if (isString) {
+        // A string: a character is a one-letter string; a slice is a substring (clamped, as in Python).
+        const base = out.slice(0, out.length - receiver.length);
+        if (indexAtDepth0(inner, /:/) >= 0) {
+          const [lo, hi, step] = splitTopLevel(inner, ':').concat(['', '', '']).map((x) => x.trim());
+          out = `${base}Py.slice(${[receiver, lo || 'null', hi || 'null', ...(step ? [step] : [])].join(', ')})`;
+        } else {
+          const neg = /^-\s*(\w+)$/.exec(inner.trim());
+          out = `${base}String.valueOf(${receiver}.charAt(${neg ? `${receiver}.length() - ${neg[1]}` : inner.trim()}))`;
+        }
       } else if (indexAtDepth0(inner, /:/) >= 0) {
         const [lo, hi, step] = splitTopLevel(inner, ':').concat(['', '', '']).map((x) => x.trim());
         if (step === '-1' && lo === '' && hi === '') {
@@ -853,7 +876,6 @@ const BUILTIN_RULES: Array<[RegExp, string | ((...args: any[]) => string)]> = [
   [/\.startswith\(/g, '.startsWith('],
   [/\.endswith\(/g, '.endsWith('],
   [/\.find\(/g, '.indexOf('],
-  [/\.isdigit\(\)/g, '.chars().allMatch(Character::isDigit)'],
   [/\.copy\(\)/g, '.copy() /* shallow copy */'],
   [new RegExp(`(${PLACEHOLDER_RE})\\.join\\(`, 'g'), 'String.join($1, '],
   [new RegExp(`(${PLACEHOLDER_RE})\\.format\\(`, 'g'), 'String.format($1, '],
@@ -873,7 +895,7 @@ function rewritePercentFormat(text: string): string {
   });
 }
 
-function rewriteOperators(text: string): string {
+function rewriteOperators(text: string, typeOf?: (name: string) => string | undefined): string {
   let t = text;
   // power and floor division
   if (t.includes('**')) t = rewriteInfix(t, /\s*\*\*\s*/g, (a, b) => `Math.pow(${a}, ${b})`);
@@ -886,7 +908,9 @@ function rewriteOperators(text: string): string {
     t = rewriteInfix(t, /\s+(not\s+)?in\s+/g, (x, coll, m) => {
       const items = tupleItems(coll);
       const target = items ? `List.of(${items.join(', ')})` : coll;
-      return `${m[1] ? '!' : ''}${target}.contains(${x})`;
+      // `key in d` on a dict tests its keys.
+      const method = /^(Map|HashMap|LinkedHashMap|TreeMap)\b/.test(typeOf?.(coll) ?? '') ? 'containsKey' : 'contains';
+      return `${m[1] ? '!' : ''}${target}.${method}(${x})`;
     });
   }
   return t;
@@ -920,10 +944,10 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   t = rewriteChainedComparisons(t);
   t = rewriteTuples(t);
   t = rewriteStarUnpacking(t);
-  t = rewriteComprehensions(t);
+  t = rewriteComprehensions(t, ctx.typeOf);
   t = rewriteLambda(t);
   t = rewriteTernary(t);
-  t = rewriteBrackets(t);
+  t = rewriteBrackets(t, ctx.typeOf);
   t = rewriteBraces(t);
   if (ctx.valueContext) t = rewriteOrFallback(t);
   for (const [re, rep] of KEYWORD_RULES) t = t.replace(re, rep);
@@ -931,13 +955,15 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   if (ctx.className) t = t.replace(/\bcls\b/g, ctx.className);
   const literals = ctx.literals;
   t = rewriteBuiltinCalls(t, {
+    typeOf: ctx.typeOf,
     literal: (token) => {
       const idx = new RegExp(`^${PLACEHOLDER_RE}$`).test(token) ? Number(token.slice(1, -1)) : -1;
       return idx >= 0 ? literals?.[idx] : undefined;
     },
   });
   for (const [re, rep] of BUILTIN_RULES) t = t.replace(re, rep as string);
-  t = rewriteOperators(t);
+  t = rewritePythonMethods(t, ctx);
+  t = rewriteOperators(t, ctx.typeOf);
   t = rewriteExceptionNames(t);
   // keyword arguments: f(name=value) -> f(/* name = */ value)
   t = t.replace(/([(,]\s*)([A-Za-z_]\w*)\s*=(?!=)\s*/g, '$1/* $2 = */ ');
@@ -970,7 +996,95 @@ export function translateMaskedExpression(masked: string, ctx: ExprContext = {})
   if (t.includes(')(')) t = rewriteCallsOnValues(t, ctx.className);
   if (t.includes(' instanceof ')) t = parenthesizeNegatedInstanceof(t);
   if (ctx.modules?.size) t = rewriteModuleReferences(t, ctx.modules);
+  t = rewriteBuiltinValues(t, ctx.classNames);
   return t;
+}
+
+/**
+ * Methods only Python's `str` and `list` have, called on any receiver: the runtime library does
+ * what Python does (`split()` on whitespace, `split(",")` with a literal separator, `strip(chars)`,
+ * `pop()`, `remove(value)` by value), and accepts a receiver whose type is not known.
+ * `JAVA` maps those with a plain Java equivalent; `PY` those that need a helper, by arity
+ * (`undefined` = any).
+ */
+const JAVA_METHODS: Record<string, (recv: string, args: string[]) => string | undefined> = {
+  rfind: (r, a) => `${r}.lastIndexOf(${a.join(', ')})`,
+  casefold: (r, a) => (a.length ? undefined : `${r}.toLowerCase()`),
+  lstrip: (r, a) => (a.length ? undefined : `${r}.stripLeading()`),
+  rstrip: (r, a) => (a.length ? undefined : `${r}.stripTrailing()`),
+  reverse: (r, a) => (a.length ? undefined : `Collections.reverse(${r})`),
+  // `xs.sort(key=f, reverse=True)` as `sorted(...)` does it; keyword arguments are still `k=v` here.
+  sort: (r, a) => {
+    const kw = new Map(a.map((x) => /^(key|reverse)\s*=\s*([\s\S]+)$/.exec(x)).filter((x): x is RegExpExecArray => x !== null).map((x) => [x[1], x[2].trim()]));
+    if (kw.size !== a.length) return undefined;
+    return `${r}.sort(${comparator(kw) || 'null'})`;
+  },
+};
+const PY_METHODS: Record<string, number | undefined> = {
+  split: undefined, rsplit: undefined, splitlines: undefined, partition: 1, rpartition: 1, count: 1, index: 1, zfill: 1,
+  ljust: undefined, rjust: undefined, center: undefined, title: 0, capitalize: 0, removeprefix: 1, removesuffix: 1,
+  expandtabs: undefined, encode: undefined, decode: undefined, pop: undefined, remove: 1, strip: -1, lstrip: -1, rstrip: -1,
+  isdigit: 0, isdecimal: 0, isnumeric: 0, isalpha: 0, isalnum: 0, isspace: 0, isupper: 0, islower: 0, isascii: 0, isidentifier: 0,
+};
+
+function rewritePythonMethods(text: string, ctx: ExprContext): string {
+  const names = [...Object.keys(PY_METHODS), ...Object.keys(JAVA_METHODS)];
+  if (!new RegExp(`\\.(${names.join('|')})\\(`).test(text)) return text;
+  let t = text;
+  const call = new RegExp(`\\.(${names.join('|')})\\(`, 'g');
+  for (let m = call.exec(t); m; m = call.exec(t)) {
+    const method = m[1];
+    const start = postfixStart(t, m.index);
+    const recv = t.slice(start, m.index);
+    const open = m.index + m[0].length - 1;
+    const end = groupEnd(t, open);
+    if (end < 0) break;
+    const root = /^[\w$]+/.exec(recv)?.[0] ?? '';
+    // A class (`Re.split`, `Os.path.split`), a module (`shlex.split`) or the class's own method.
+    const skip = !recv || /^[A-Z][\w.]*$/.test(recv) || ctx.importedModules?.has(root) || ctx.modules?.has(root)
+      || ((recv === 'this' || recv === 'super') && ctx.classMethods?.has(method));
+    if (skip) continue;
+    const args = splitTopLevel(t.slice(open + 1, end - 1)).map((a) => a.trim()).filter(Boolean);
+    let out: string | undefined;
+    if (JAVA_METHODS[method]) out = JAVA_METHODS[method](recv, args);
+    if (out === undefined && method in PY_METHODS) {
+      const arity = PY_METHODS[method];
+      // strip/lstrip/rstrip: `strip()` keeps Java's trim (see BUILTIN_RULES); with chars, the helper.
+      if (arity === -1 ? args.length > 0 : arity === undefined || arity === args.length) out = `Py.${method}(${[recv, ...args].join(', ')})`;
+    }
+    if (out === undefined) continue;
+    t = t.slice(0, start) + out + t.slice(end);
+    call.lastIndex = start + out.length;
+  }
+  return t;
+}
+
+/** Python's warning categories: classes nested in the runtime's `Warnings`. */
+export const WARNING_CATEGORIES = new Set(['Warning', 'UserWarning', 'DeprecationWarning', 'PendingDeprecationWarning', 'FutureWarning',
+  'RuntimeWarning', 'SyntaxWarning', 'ImportWarning', 'UnicodeWarning', 'BytesWarning', 'ResourceWarning', 'EncodingWarning']);
+
+/**
+ * Python names that are values, not types, in Java:
+ *
+ *   NotImplemented, Ellipsis / ...       -> Py.NotImplemented, Py.Ellipsis
+ *   warn(msg, DeprecationWarning)        -> warn(msg, Warnings.DeprecationWarning.class)
+ *   if cls is Order (a class as a value) -> if (Order.class == ...)
+ */
+function rewriteBuiltinValues(text: string, classNames: Set<string> | undefined): string {
+  let t = text.replace(/(?<![\w.$\u0001])(NotImplemented|Ellipsis)(?![\w$])/g, 'Py.$1');
+  t = t.replace(/(?<![\w.$\u0001])\.\.\.(?![\w.])/g, 'Py.Ellipsis');
+  t = t.replace(/(?<![\w.$\u0001])([A-Z]\w*Warning)\b(?!\s*[.:])/g, (m: string, name: string, at: number, whole: string) => {
+    if (!WARNING_CATEGORIES.has(name)) return m;
+    const qualified = `Warnings.${name}`;
+    return /\bnew\s+$/.test(whole.slice(0, at)) || whole[at + m.length] === '(' ? qualified : `${qualified}.class`;
+  });
+  if (!classNames?.size) return t;
+  return t.replace(/(?<![\w.$@\u0001<])([A-Z]\w*)(?![\w$]|\s*[.(<>\[:]|\s+[A-Za-z_])/g, (m: string, name: string, at: number, whole: string) => {
+    if (!classNames.has(name)) return m;
+    // `new Order(...)`, `x instanceof Order`, `(Order) x` are types already.
+    if (/\b(new|instanceof)\s+$/.test(whole.slice(0, at)) || (whole[at - 1] === '(' && whole[at + m.length] === ')')) return m;
+    return `${name}.class`;
+  });
 }
 
 /**

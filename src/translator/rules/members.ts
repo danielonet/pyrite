@@ -43,6 +43,8 @@ export interface ClassMembers {
   properties: Map<string, PropertyInfo>;
   /** Method name -> Java return type (from the `-> T` hint). */
   methods: Map<string, string>;
+  /** Every method the class defines, hinted or not. */
+  methodNames: Set<string>;
   /** Field name -> Java type, from `self.x` assignments and class-level annotations. */
   fields: Map<string, string>;
 }
@@ -253,7 +255,7 @@ export function scanMembers(lines: LogicalLine[]): MemberScan {
     let m: RegExpExecArray | null;
     if ((m = /^class\s+(\w+)\s*(?:\[[^\]]*\])?\s*(?:\((.*)\))?\s*:$/.exec(code))) {
       const bases = splitTopLevel(m[2] ?? '').map((b) => b.trim()).filter((b) => b && !/^metaclass=/.test(b));
-      const members: ClassMembers = { name: m[1], bases, properties: new Map(), methods: new Map(), fields: new Map() };
+      const members: ClassMembers = { name: m[1], bases, properties: new Map(), methods: new Map(), methodNames: new Set(), fields: new Map() };
       for (const f of collectSelfFields(lines, i)) {
         members.fields.set(f.name, f.type);
         scan.attributes.add(f.name);
@@ -269,6 +271,7 @@ export function scanMembers(lines: LogicalLine[]): MemberScan {
       const ret = hint ? boxIfNullable(translateType(unmask(hint)), scanNullability(bodyLines(lines, i), l.indent).returnsNone) : undefined;
       if (atMemberLevel) {
         const cls = enclosing!.members;
+        cls.methodNames.add(name);
         const isGetter = decorators.some((d) => /^@(cached_)?property\b/.test(d));
         const isSetter = decorators.some((d) => new RegExp(`^@${name}\\.setter\\b`).test(d));
         if (isGetter) {

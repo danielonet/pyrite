@@ -8,6 +8,31 @@ All notable changes to Pyrite are recorded here. The format follows
 
 ### Added
 
+- **Locals follow Java's blocks.** A local declared inside a block is out of
+  scope (and declared again where needed) once the block closes, as in Java;
+  a loop variable used after its loop is declared before it, and a loop
+  variable already in scope is walked through a fresh one
+  (`for (var item : xs) { x = item; ...`).
+- **Python values that are not types.** `NotImplemented` and `...` ->
+  `Py.NotImplemented`, `Py.Ellipsis`; warning categories are runtime classes
+  (`warn(msg, DeprecationWarning)` -> `Warnings.DeprecationWarning.class`,
+  `except DeprecationWarning`, `raise UserWarning(...)`); a class of the file
+  used as a value is `Name.class` (`if cls is Order`).
+- **Functions defined under a module-level `if`/`try`** (platform switches,
+  optional-import fallbacks) are static fields holding a lambda, assigned in
+  the static block; calls anywhere in the file go through them
+  (`_norm(x)` -> `_norm.apply(x)`).
+- **Parameter types from usage.** An unhinted parameter used only as a list
+  (`append`, `xs[0]`), a string (`split`, `strip`, ...) or a dict (`items()`,
+  `d["k"]`) gets that type.
+- **Python's `str` and `list` methods.** Methods only Python has go through
+  the runtime (`s.split()` -> `Py.split(s)`, `s.strip(chars)`, `partition`,
+  `splitlines`, `isdigit` (false for `""`, as in Python), `xs.pop()`,
+  `xs.remove(v)` by value, ...); `xs.sort(key=f, reverse=True)` sorts with a
+  comparator. On a known string, `s[i]` -> `String.valueOf(s.charAt(i))`, a
+  slice -> `Py.slice(s, ...)`, `len(s)` -> `s.length()`, `for c in s` walks
+  `Py.chars(s)`; `key in d` on a known dict -> `d.containsKey(key)`.
+
 - **Runtime library.** Python semantics with no one-line Java equivalent go
   through a small Java library whose sources Pyrite writes into the view
   project (`src/main/java/pyrite/runtime/`, imported like any other class):
@@ -40,7 +65,7 @@ All notable changes to Pyrite are recorded here. The format follows
   Python keeps the value across iterations, nor directly in a `match`.
 
 javac errors on the gated Python 3.12 standard library (`npm run measure`):
-34,629 -> 26,384: unknown names 10,549 -> 6,269, runtime library 2,674 -> 0,
+34,629 -> 25,214: unknown names 10,549 -> 6,269, runtime library 2,674 -> 0,
 truthiness 1,581 -> 191, module references 4,409 -> 2,702.
 
 - **Generators are collected eagerly.** Java has no `yield` that suspends a
@@ -240,6 +265,8 @@ truthiness 1,581 -> 191, module references 4,409 -> 2,702.
   come last; a decorator call whose arguments are not annotation constants
   (`@wraps(f)`) stays a comment instead of an invalid annotation;
   `issubclass(x, type)` -> `Class.class.isAssignableFrom(x)`.
+- A bare `dict` hint was `Map<?>` (a map takes two type arguments): it is
+  `Map<?, ?>`.
 - A variable named like `yielded` was read as a `yield` statement.
 - A function containing a nested generator was itself typed as a generator.
 - `Generator[int, None, None]` became `Iterator<Integer, Void, Void>`; it is
