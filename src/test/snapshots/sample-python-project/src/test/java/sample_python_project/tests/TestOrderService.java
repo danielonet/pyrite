@@ -5,18 +5,21 @@ package sample_python_project.tests;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.junit.jupiter.api.Test;
+
 import sample_python_project.inventory.Models.Customer;
 import sample_python_project.inventory.Models.OrderStatus;
 import sample_python_project.inventory.Models.Product;
 import sample_python_project.inventory.Repository.InMemoryRepository;
 import sample_python_project.inventory.services.OrderService;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 // python: import pytest
 
-// No Java import found for: @Fixture
-
 public final class TestOrderService {
-    @Fixture
+    // pytest fixture: tests that name it as a parameter call it
     public static OrderService service() {
         InMemoryRepository repo = new InMemoryRepository();
         repo.add_product(new Product(/* sku = */ "A", /* name = */ "Thing", /* price = */ 10.0, /* stock = */ 5));
@@ -24,21 +27,27 @@ public final class TestOrderService {
         return new OrderService(repo);
     }
 
-    public static void test_place_order_reserves_stock(Object service) {
+    @Test
+    public void test_place_order_reserves_stock() {
+        var service = service();
         var order = service.place_order(1, Map.of("A", 2));
-        assert order.total() == 20.0;
-        assert service.repo.product("A").stock == 3;
+        assertThat(order.total()).isEqualTo(20.0);
+        assertThat(service.repo.product("A").stock).isEqualTo(3);
     }
 
-    public static void test_empty_order_is_rejected(Object service) {
-        try (var ctx = pytest.raises(IllegalArgumentException)) { // with: context manager
+    @Test
+    public void test_empty_order_is_rejected() {
+        var service = service();
+        assertThatThrownBy(() -> {
             service.place_order(1, new HashMap<>());
-        }
+        }).isInstanceOf(IllegalArgumentException.class);
     }
 
-    public static void test_pay_changes_status(Object service) {
+    @Test
+    public void test_pay_changes_status() {
+        var service = service();
         var order = service.place_order(1, Map.of("A", 1));
         service.pay(order.id);
-        assert order.status == OrderStatus.PAID;
+        assertThat(order.status).isSameAs(OrderStatus.PAID);
     }
 }

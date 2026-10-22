@@ -2421,3 +2421,90 @@ class Stack:
   contains(out, 'for (var ch : Py.chars(line)) {');
   contains(out, 'Map<?, ?> d');
 });
+
+// ------------------------------------------------------------- pytest -> JUnit 5 + AssertJ
+
+const PYTEST_SOURCE = `import pytest
+
+@pytest.fixture
+def repo() -> Repo:
+    return Repo()
+
+def test_checks(repo, tmp_path):
+    assert repo.count == 3
+    assert repo.name != "x"
+    assert repo.owner is None
+    assert repo.owner is not None
+    assert repo.active is True
+    assert repo.items
+    assert not repo.closed
+    assert len(repo.items) == 2
+    assert len(repo.items) == 0
+    assert "a" in repo.items
+    assert "b" not in repo.items
+    assert repo.size >= 2
+    assert repo.ratio == pytest.approx(0.5)
+    assert repo.count == 3, "count is off"
+
+def test_raises(repo):
+    with pytest.raises(ValueError, match="bad"):
+        repo.run()
+    with pytest.raises(KeyError) as err:
+        repo.run()
+`;
+
+test('pytest: tests become @Test methods, fixtures are called, asserts use AssertJ', () => {
+  const out = java(PYTEST_SOURCE, 'tests/test_repo.py');
+  contains(out, 'import org.junit.jupiter.api.Test;');
+  contains(out, 'import org.junit.jupiter.api.io.TempDir;');
+  contains(out, 'import static org.assertj.core.api.Assertions.assertThat;');
+  contains(out, 'import static org.assertj.core.api.Assertions.assertThatThrownBy;');
+  contains(out, 'import static org.assertj.core.api.Assertions.catchThrowable;');
+  contains(out, 'import static org.assertj.core.api.Assertions.within;');
+  contains(out, '    @Test\n    public void test_checks(@TempDir Path tmp_path) {\n        var repo = repo();');
+  assert.ok(!/\bassert [^T]/.test(out.replace(/assertThat\w*/g, '')), 'no Java assert keyword');
+  for (const line of [
+    'assertThat(repo.count).isEqualTo(3);',
+    'assertThat(repo.name).isNotEqualTo("x");',
+    'assertThat(repo.owner).isNull();',
+    'assertThat(repo.owner).isNotNull();',
+    'assertThat(repo.active).isTrue();',
+    'assertThat(Py.truthy(repo.items)).isTrue();',
+    'assertThat(Py.truthy(repo.closed)).isFalse();',
+    'assertThat(repo.items).hasSize(2);',
+    'assertThat(repo.items).isEmpty();',
+    'assertThat(repo.items).contains("a");',
+    'assertThat(repo.items).doesNotContain("b");',
+    'assertThat(repo.size).isGreaterThanOrEqualTo(2);',
+    'assertThat(repo.ratio).isCloseTo(0.5, within(1e-6));',
+    'assertThat(repo.count).as("%s", "count is off").isEqualTo(3);',
+  ]) contains(out, line);
+});
+
+test('pytest: raises blocks become assertThatThrownBy / catchThrowable', () => {
+  const out = java(PYTEST_SOURCE, 'tests/test_repo.py');
+  contains(out, 'assertThatThrownBy(() -> {');
+  contains(out, '}).isInstanceOf(IllegalArgumentException.class).hasMessageFindingMatch("bad");');
+  contains(out, 'var err = catchThrowable(() -> {');
+  contains(out, '}); assertThat(err).isInstanceOf(NoSuchElementException.class);');
+});
+
+test('pytest: production code keeps the plain assert and gets no JUnit imports', () => {
+  const out = java('def check(x):\n    assert x == 1\n', 'pkg/check.py');
+  contains(out, 'assert x == 1;');
+  assert.ok(!out.includes('org.junit') && !out.includes('assertj'));
+});
+
+test('the view project gets a pom.xml with JUnit 5 and AssertJ', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-pom-'));
+  try {
+    fs.mkdirSync(path.join(root, 'tests'));
+    fs.writeFileSync(path.join(root, 'tests', 'test_a.py'), 'def test_a():\n    assert 1 == 1\n');
+    await mirrorProject(createTranslator({ engine: 'rules' }).translator, { root });
+    const pom = fs.readFileSync(path.join(root, '.java-view', 'pom.xml'), 'utf8');
+    assert.match(pom, /<artifactId>junit-jupiter<\/artifactId>/);
+    assert.match(pom, /<artifactId>assertj-core<\/artifactId>/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

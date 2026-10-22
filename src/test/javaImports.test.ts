@@ -142,9 +142,9 @@ test('a file whose names all resolve makes no request', async () => {
 });
 
 test('decorators kept as annotations are listed but not sent to the model', async () => {
-  const source = 'import pytest\n\n@pytest.fixture\ndef repo():\n    return 1\n';
+  const source = 'import pytest\n\n@pytest.mark.slow\ndef test_repo():\n    return 1\n';
   const result = await hybrid(async () => assert.fail('the model must not be asked')).translate({ source, relativePath: 'tests/test_x.py' });
-  assert.match(result.java, /\/\/ No Java import found for: @Fixture/);
+  assert.match(result.java, /\/\/ No Java import found for: @Slow/);
   assert.ok(!result.warnings.some((w) => w.includes('no Java import found')));
 });
 

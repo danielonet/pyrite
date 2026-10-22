@@ -22,6 +22,7 @@ import { boxed, splitTopLevel, translateType } from './typeHints';
 import { ExprContext, LocalFunction, indexAtDepth0, mapExceptionName, sliceBound, setFStringExpressionContext, translateExpression, translateMaskedExpression } from './expressions';
 import { JavadocMode, SymbolInfo, SymbolKind, TranslateInput, TranslateResult, Translator, isInitModule, moduleClassName, packageFromPath, pythonPackageParts, toPascalCase } from '../types';
 import { FieldInfo, KnownMembers, MemberScan, classNameOf, collectSelfFields, elementTypeOf, inferTypeFromMaskedValue, mapTypesOf, scanMembers, toKnownMembers, typeFromDefault } from './members';
+import { FIXTURE_DECORATOR, assertStatement, parseRaises, raisesBlock } from './junit';
 import { describeClassSummary, describeMethodSummary, isTestFile, paramTag, renderJavadoc, returnTag } from './javadoc';
 import { DEFAULT_LINE_WIDTH, formatJavaLine } from './layout';
 import { applyImports, codeOnly, planImports, renderImports } from '../imports/javaImports';
@@ -340,6 +341,10 @@ class RuleTranslation {
   private readonly warnings: string[] = [];
   private readonly stack: Block[] = [];
   private pendingDecorators: { text: string; py: number }[] = [];
+  /** Test code (by path): pytest becomes JUnit 5 + AssertJ. */
+  private readonly testFile: boolean;
+  /** `@pytest.fixture` functions of this module: tests naming one as a parameter get it from a call. */
+  private readonly fixtureNames = new Set<string>();
   /** Blank lines and comments seen since the last code line; flushed after blocks are closed. */
   private pendingTrivia: { kind: 'blank' | 'comment'; text: string; py: number }[] = [];
   private moduleDoc: OutLine[] = [];
@@ -379,6 +384,23 @@ class RuleTranslation {
     const requestedMode = input.javadocMode ?? 'docstringOnly';
     // Test code never gets Javadoc unless the user opted it into the same rules as production code.
     this.javadocMode = isTestFile(input.relativePath) && !input.documentTestCode ? 'none' : requestedMode;
+    this.testFile = isTestFile(input.relativePath);
+    if (this.testFile) this.scanFixtures();
+  }
+
+  private scanFixtures(): void {
+    let fixture = false;
+    for (const l of this.lines) {
+      if (l.kind !== 'code') continue;
+      const text = l.text.trim();
+      if (FIXTURE_DECORATOR.test(text)) fixture = true;
+      else if (text.startsWith('@')) continue;
+      else {
+        const m = fixture ? /^(?:async\s+)?def\s+(\w+)/.exec(text) : null;
+        if (m) this.fixtureNames.add(m[1]);
+        fixture = false;
+      }
+    }
   }
 
   /** Whether a class/method with (or without) a docstring should get a Javadoc comment, per javadocMode. */
@@ -1578,7 +1600,10 @@ class RuleTranslation {
     const isAbstract = decorators.some((d) => /^@(abc\.)?abstractmethod\b/.test(d.text));
     const isProperty = decorators.some((d) => /^@(cached_)?property\b/.test(d.text));
     const isSetter = decorators.some((d) => /^@\w+\.setter\b/.test(d.text));
-    const otherDecorators = decorators.filter((d) => !/^@(staticmethod|classmethod|(abc\.)?abstractmethod|(cached_)?property|\w+\.setter)\b/.test(d.text));
+    const isFixture = this.testFile && decorators.some((d) => FIXTURE_DECORATOR.test(d.text));
+    const isTest = this.testFile && !isFixture && /^test/.test(name);
+    const fixtureArgs: string[] = [];
+    const otherDecorators = decorators.filter((d) => !/^@(staticmethod|classmethod|(abc\.)?abstractmethod|(cached_)?property|\w+\.setter)\b/.test(d.text) && !(isFixture && FIXTURE_DECORATOR.test(d.text)));
 
     const doc = this.docstringAfter(i);
     const docLine = doc >= 0 ? this.lines[doc] : undefined;
@@ -1620,6 +1645,17 @@ class RuleTranslation {
       }
       const [, pname, hint, def] = parsed;
       declared.add(pname);
+      if (isTest || isFixture) {
+        if (this.fixtureNames.has(pname)) {
+          fixtureArgs.push(pname);
+          return;
+        }
+        if (pname === 'tmp_path') {
+          params.push('@TempDir Path tmp_path');
+          paramNames.push(pname);
+          return;
+        }
+      }
       let type = hint ? translateType(hint) : def ? typeFromDefault(def) : 'Object';
       // No hint and no telling default: what the body does with it (`p.split()` -> String).
       if (type === 'Object' && (def === undefined || def.trim() === 'None')) type = typeFromUsage(pname, this.ownBodyCode(i)) ?? 'Object';
@@ -1675,6 +1711,12 @@ class RuleTranslation {
       if (generator) this.startGenerator(i, ret, py);
       return;
     }
+    if (isTest) {
+      this.emit('@Test', py);
+      // JUnit runs instance methods; a module-level test function is not static.
+      modifiers = modifiers.filter((mod) => mod !== 'static');
+    }
+    if (isFixture) this.emit('// pytest fixture: tests that name it as a parameter call it', py);
     for (const d of otherDecorators) this.emit(this.decoratorToAnnotation(d.text), d.py);
     if (isProperty) this.emit(`@Property // Python property: read as obj.${name}, rendered as obj.${name}()`, py);
     if (isSetter) this.emit(`@PropertySetter // Python setter: obj.${name} = value, rendered as obj.${name}(value)`, py);
@@ -1697,6 +1739,7 @@ class RuleTranslation {
       this.out[this.out.length - 1].text = this.out[this.out.length - 1].text.replace(/;(\s*\/\/.*)?$/, ' {$1');
     }
     this.stack.push({ indent: line.indent, kind: 'def', declared, types, nullability, hoists: planHoistedLocals(this.lines, i, declared) });
+    for (const f of fixtureArgs) this.emit(`var ${f} = ${f}();`, py);
     if (generator && !isCtor) this.startGenerator(i, ret, py);
   }
 
@@ -1996,6 +2039,13 @@ class RuleTranslation {
     const py = line.startLine;
     const items = splitTopLevel(stripOuterParens(itemsText));
     const asyncNote = isAsync ? ' /* async with */' : '';
+    const raises = this.testFile && items.length === 1 ? parseRaises(items[0]) : undefined;
+    if (raises) {
+      const block = raisesBlock(raises, (e) => unmaskStrings(translateMaskedExpression(e, this.exprCtx(lits)), lits));
+      this.emit(`${block.open}${comment}`, py);
+      this.stack.push({ indent: line.indent, kind: 'with', closer: block.close });
+      return;
+    }
     const resources: string[] = [];
     const bound: string[] = [];
     let counter = 0;
@@ -2069,6 +2119,7 @@ class RuleTranslation {
       return this.emit(`throw ${needsNew ? 'new ' : ''}${translated};${cause}${comment}`, py);
     }
     if ((m = /^assert\s+(.+)$/.exec(code))) {
+      if (this.testFile) return this.emit(`${assertStatement(m[1], ex)}${comment}`, py);
       const parts = splitTopLevel(m[1]);
       return this.emit(`assert ${ex(parts[0])}${parts[1] ? ` : ${ex(parts[1])}` : ''};${comment}`, py);
     }

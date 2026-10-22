@@ -23,6 +23,7 @@
 import { SymbolInfo } from '../types';
 import { JDK_CLASSES } from './jdkClasses';
 import { RUNTIME_MODULE_CLASSES, runtimeImportFor } from './pythonModules';
+import { ASSERTJ_CLASS, ASSERTJ_STATICS, JUNIT_CLASSES } from '../rules/junit';
 import { RUNTIME_PACKAGE } from './runtimePackage';
 
 /** One line of the new import block, with the Python line it came from (0 when synthetic). */
@@ -300,6 +301,10 @@ export function planImports(view: JavaView, pythonSource: string, modules: Recor
         library.add(`lombok.${name}`);
         continue;
       }
+      if (annotation && Object.prototype.hasOwnProperty.call(JUNIT_CLASSES, name)) {
+        library.add(JUNIT_CLASSES[name]);
+        continue;
+      }
       if (RUNTIME_CLASSES.has(name)) {
         library.add(`${RUNTIME_PACKAGE}.${name}`);
         continue;
@@ -320,6 +325,11 @@ export function planImports(view: JavaView, pythonSource: string, modules: Recor
       if (!unresolved.has(name)) unresolved.set(name, { name, usage: lines[end + k].trim().slice(0, 160), annotation });
     }
   });
+
+  // AssertJ's static entry points, called by the translated pytest asserts.
+  for (const fn of ASSERTJ_STATICS) {
+    if (body.some((code) => new RegExp(`(^|[^\\w.$])${fn}\\(`).test(code))) projectStatic.add(`${ASSERTJ_CLASS}.${fn}`);
+  }
 
   const pythonOnly: ImportLine[] = [...pythonOnlyLines]
     .filter((py) => !usefulPyLines.has(py))
