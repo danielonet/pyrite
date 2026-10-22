@@ -42,7 +42,7 @@ Pyrite mirrors every `.py` file in your workspace into a `.java-view/`
 folder laid out as a **standard Java project**: production code in
 `src/main/java`, test code (`test_*.py`, `*_test.py`, `conftest.py`, anything under
 `test`/`tests`) in `src/test/java`. Every package starts with the project's name
-(the workspace folder, or `pyrite.basePackage`) followed by the Python folder path,
+(the workspace folder, or `pyrite.basePackage`, optionally behind `pyrite.basePackagePrefix`) followed by the Python folder path,
 and each file is named after its Java class, as Java requires. Each module is
 translated into a Java-flavored
 *reading view*. The view keeps Python's names, order, comments
@@ -359,6 +359,7 @@ Use `--dry-run` to build and package without publishing.
 | `pyrite.resolveImports` | `true` | replace Python's imports with real Java ones, in both modes (see [Real Java imports](#real-java-imports)) |
 | `pyrite.outputFolder` | `.java-view` | where the mirror is written (relative to the workspace root), as `src/main/java` and `src/test/java` |
 | `pyrite.basePackage` | *(empty)* | package every view starts with, e.g. `com.acme.shop`; empty uses the workspace folder's name (`my-project` -> `my_project`) |
+| `pyrite.basePackagePrefix` | *(empty)* | package put in front of the project's name: `com.acme` + folder `my-project` -> `com.acme.my_project` |
 | `pyrite.exclude` | venv, node_modules, ... | glob patterns to skip |
 | `pyrite.watch` | `true` | re-translate on save |
 | `pyrite.javadoc` | `docstringOnly` | Javadoc generation: `always` (every class/method, extrapolated when there's no docstring), `docstringOnly` (only where a docstring exists), or `none` (no Javadoc; docstrings kept as plain comments) |

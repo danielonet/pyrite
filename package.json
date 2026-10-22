@@ -182,6 +182,11 @@
           "default": "",
           "markdownDescription": "Package every Java view starts with, followed by the Python folder path: with `com.acme.shop`, `inventory/models.py` becomes `com.acme.shop.inventory.Models` in `src/main/java/com/acme/shop/inventory/Models.java`. Leave empty to use the workspace folder's name (`sample-python-project` -> `sample_python_project`)."
         },
+        "pyrite.basePackagePrefix": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Package put in front of the project's name: with `com.acme` and a workspace folder `sample-python-project`, `inventory/models.py` becomes `com.acme.sample_python_project.inventory.Models` in `src/main/java/com/acme/sample_python_project/inventory/Models.java`. Works with `#pyrite.basePackage#`, which replaces the project-name part. Leave empty for no prefix."
+        },
         "pyrite.exclude": {
           "type": "array",
           "items": {

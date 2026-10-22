@@ -73,6 +73,8 @@ interface Settings {
   outputFolder: string;
   /** `pyrite.basePackage` as configured; blank means the workspace folder's name (see `projectBasePackage`). */
   basePackage: string;
+  /** `pyrite.basePackagePrefix`: put in front of the project's package (`com.acme` -> `com.acme.<project>`). */
+  basePackagePrefix: string;
   exclude: string[];
   watch: boolean;
   javadoc: JavadocMode;
@@ -93,6 +95,7 @@ function settings(): Settings {
     engine: cfg.get<EngineName>('engine', 'rules'),
     outputFolder: cfg.get<string>('outputFolder', '.java-view'),
     basePackage: cfg.get<string>('basePackage', ''),
+    basePackagePrefix: cfg.get<string>('basePackagePrefix', ''),
     exclude: cfg.get<string[]>('exclude', []),
     watch: cfg.get<boolean>('watch', true),
     javadoc: cfg.get<JavadocMode>('javadoc', 'docstringOnly'),
@@ -180,6 +183,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
             root: root.uri.fsPath,
             outputFolder: s.outputFolder,
             basePackage: s.basePackage,
+            basePackagePrefix: s.basePackagePrefix,
             exclude: s.exclude,
             subfolder,
             javadocMode: s.javadoc,
@@ -236,7 +240,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   const translator = buildTranslator(root.uri.fsPath);
   beginBusy();
   try {
-    const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage);
+    const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage, s.basePackagePrefix);
     const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, basePackage, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth, invalidJava: s.invalidJava });
     symbolIndexFor(root, s.outputFolder).invalidatePython(rel, basePackage);
     void refreshStatusReport(pyUri);
@@ -273,7 +277,7 @@ async function openJavaView(): Promise<void> {
   if (editor.document.isDirty) await editor.document.save();
   const s = settings();
   const rel = relPath(root, editor.document.uri.fsPath);
-  const javaAbs = path.join(root.uri.fsPath, s.outputFolder, javaPathFor(rel, projectBasePackage(root.uri.fsPath, s.basePackage)));
+  const javaAbs = path.join(root.uri.fsPath, s.outputFolder, javaPathFor(rel, projectBasePackage(root.uri.fsPath, s.basePackage, s.basePackagePrefix)));
   const javaUri = fs.existsSync(javaAbs) ? vscode.Uri.file(javaAbs) : await translateOne(editor.document.uri, false);
   if (!javaUri) return;
   const map = readSourceMap(root.uri.fsPath, javaUri.fsPath, s.outputFolder);
@@ -606,7 +610,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!root || !settings().watch || isInsideOutput(root, uri.fsPath)) return;
       const rel = relPath(root, uri.fsPath);
       const s = settings();
-      const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage);
+      const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage, s.basePackagePrefix);
       if (rel.endsWith('.py')) {
         removeMirroredFile(root.uri.fsPath, rel, s.outputFolder, basePackage);
         symbolIndexFor(root, s.outputFolder).invalidatePython(rel, basePackage);

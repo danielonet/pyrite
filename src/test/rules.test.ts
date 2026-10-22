@@ -2508,3 +2508,28 @@ test('the view project gets a pom.xml with JUnit 5 and AssertJ', async () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('projectBasePackage: a prefix goes in front of the project name or of the configured package', () => {
+  assert.equal(projectBasePackage('/work/Sample-Python-Project'), 'sample_python_project');
+  assert.equal(projectBasePackage('/work/Sample-Python-Project', '', 'com.acme'), 'com.acme.sample_python_project');
+  assert.equal(projectBasePackage('/work/Sample-Python-Project', 'shop', ' Com.Acme '), 'com.acme.shop');
+  assert.equal(projectBasePackage('/work/shop', undefined, ''), 'shop');
+});
+
+test('mirrorProject: basePackagePrefix + project name is the package of every view', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pyrite-prefix-'));
+  const root = path.join(tmp, 'my-shop');
+  try {
+    fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'models.py'), 'class Order:\n    pass\n', 'utf8');
+    fs.writeFileSync(path.join(root, 'tests', 'test_models.py'), 'def test_order():\n    assert True\n', 'utf8');
+    const { translator } = createTranslator({ engine: 'rules' });
+    await mirrorProject(translator, { root, basePackagePrefix: 'com.acme' });
+    const main = path.join(root, '.java-view', 'src', 'main', 'java', 'com', 'acme', 'my_shop', 'Models.java');
+    contains(fs.readFileSync(main, 'utf8'), 'package com.acme.my_shop;');
+    assert.ok(fs.existsSync(path.join(root, '.java-view', 'src', 'test', 'java', 'com', 'acme', 'my_shop', 'tests', 'TestModels.java')));
+    contains(fs.readFileSync(path.join(root, '.java-view', 'pom.xml'), 'utf8'), '<groupId>com.acme.my_shop</groupId>');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

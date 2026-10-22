@@ -51,6 +51,8 @@ export interface MirrorOptions {
   invalidJava?: InvalidJavaMode;
   /** Package every view sits under; blank or omitted takes the root folder's name (see `projectBasePackage`). */
   basePackage?: string;
+  /** In front of the project's package, e.g. `com.acme` -> `com.acme.<project>` (see `projectBasePackage`). */
+  basePackagePrefix?: string;
   /** Progress callback: called once per file with the relative path and index. */
   onProgress?: (relativePath: string, index: number, total: number) => void;
   /** Cooperative cancellation. */
@@ -117,9 +119,12 @@ export const TEST_SOURCES = 'src/test/java';
  * The package every view of the project at `root` sits under: `configured` when it is set
  * (e.g. `com.acme.shop`), otherwise the root folder's name (`sample-python-project` ->
  * `sample_python_project`). Either way made a valid, lowercase Java package name.
+ * A `prefix` (e.g. `com.acme`) goes in front of that: `com.acme.sample_python_project`.
  */
-export function projectBasePackage(root: string, configured?: string): string {
-  return basePackageFor(configured?.trim() || path.basename(path.resolve(root))) || 'project';
+export function projectBasePackage(root: string, configured?: string, prefix?: string): string {
+  const name = basePackageFor(configured?.trim() || path.basename(path.resolve(root))) || 'project';
+  const lead = basePackageFor(prefix?.trim() ?? '');
+  return lead ? `${lead}.${name}` : name;
 }
 
 /** Minimal glob matcher supporting `**`, `*` and `?` against forward-slash paths. */
@@ -505,7 +510,7 @@ function removeLegacyViews(root: string, relativePython: string, outputFolder: s
 export async function mirrorProject(translator: Translator, options: MirrorOptions): Promise<MirrorSummary> {
   const outputFolder = options.outputFolder ?? '.java-view';
   const exclude = options.exclude ?? DEFAULT_EXCLUDES;
-  const basePackage = projectBasePackage(options.root, options.basePackage);
+  const basePackage = projectBasePackage(options.root, options.basePackage, options.basePackagePrefix);
   const files = await listPythonFilesAsync(options.root, exclude, options.isCancelled, options.subfolder);
   const outputRoot = path.join(options.root, outputFolder);
   // Cross-file knowledge: a full run scans the whole project; a subfolder run refreshes its part on top of the last full scan.

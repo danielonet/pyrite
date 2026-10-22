@@ -2,7 +2,7 @@
 /**
  * Command-line entry point, useful without VS Code (CI, quick experiments).
  *
- *   pyrite <project-root> [--out .java-view] [--package com.acme.shop]
+ *   pyrite <project-root> [--out .java-view] [--package com.acme.shop] [--package-prefix com.acme]
  *   pyrite --file path/to/module.py            # print the Java view of one file to stdout
  */
 
@@ -20,6 +20,8 @@ interface Args {
   out: string;
   /** Base package; unset means the project folder's name. */
   basePackage?: string;
+  /** Goes in front of the project's package (`com.acme` -> `com.acme.<project>`). */
+  basePackagePrefix?: string;
   engine: EngineName;
   ollamaUrl?: string;
   ollamaModel?: string;
@@ -39,6 +41,7 @@ function parseArgs(argv: string[]): Args {
     const next = () => argv[++i];
     if (a === '--out') args.out = next();
     else if (a === '--package') args.basePackage = next();
+    else if (a === '--package-prefix') args.basePackagePrefix = next();
     else if (a === '--file') args.file = next();
     else if (a === '--engine') {
       const value = next();
@@ -92,11 +95,12 @@ function parseArgs(argv: string[]): Args {
 
 function printUsage(): void {
   console.log(`Usage:
-  pyrite <project-root> [--out .java-view] [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--invalid-java stub|keep] [--engine rules|hybrid] [--quiet]
-  pyrite --file <module.py> [--package com.acme.shop] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--invalid-java stub|keep]
+  pyrite <project-root> [--out .java-view] [--package com.acme.shop] [--package-prefix com.acme] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--invalid-java stub|keep] [--engine rules|hybrid] [--quiet]
+  pyrite --file <module.py> [--package com.acme.shop] [--package-prefix com.acme] [--javadoc always|docstringOnly|none] [--javadoc-test-code] [--no-lombok] [--line-width 120] [--invalid-java stub|keep]
 
   --out <folder>        Output folder; laid out as a Java project (src/main/java, src/test/java).
   --package <name>      Package every view starts with (default: the project folder's name).
+  --package-prefix <p>  Put p in front of it: with com.acme, <p>.<project folder name>.
   --javadoc-test-code   Apply the same --javadoc rules to test code too (default: test code is never documented).
   --no-lombok           Spell out boilerplate instead of collapsing it to Lombok annotations (default: on).
   --line-width <n>      Wrap generated lines longer than n columns (default: 120, 0 = no wrapping).
@@ -142,6 +146,7 @@ async function main(): Promise<void> {
     root,
     outputFolder: args.out,
     basePackage: args.basePackage,
+    basePackagePrefix: args.basePackagePrefix,
     exclude: DEFAULT_EXCLUDES,
     javadocMode: args.javadoc,
     documentTestCode: args.javadocTestCode,
