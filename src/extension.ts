@@ -29,8 +29,31 @@ let statusItem: vscode.StatusBarItem;
 
 /** Status bar label: the logo alone, from the extension's own icon font (contributed in package.json). */
 const STATUS_IDLE = '$(pyrite-logo)';
-/** Same place while a translation is running, with the built-in spinner. */
-const STATUS_BUSY = '$(sync~spin)';
+/** While work is running the logo blinks slowly: it fades to the disabled colour and back every this many ms. */
+const BLINK_MS = 900;
+
+let busyCount = 0;
+let blinkTimer: NodeJS.Timeout | undefined;
+
+/** Start the blinking indicator; calls nest, so it stops when the last piece of work ends. */
+function beginBusy(): void {
+  busyCount += 1;
+  if (busyCount > 1 || !statusItem) return;
+  let dim = false;
+  statusItem.show();
+  blinkTimer = setInterval(() => {
+    dim = !dim;
+    statusItem.color = dim ? new vscode.ThemeColor('disabledForeground') : undefined;
+  }, BLINK_MS);
+}
+
+function endBusy(): void {
+  busyCount = Math.max(0, busyCount - 1);
+  if (busyCount > 0) return;
+  if (blinkTimer) clearInterval(blinkTimer);
+  blinkTimer = undefined;
+  if (statusItem) statusItem.color = undefined;
+}
 
 /** One symbol index per workspace folder + output folder, kept warm between "Go to Definition" calls. */
 const symbolIndexes = new Map<string, SymbolIndexCache>();
@@ -145,6 +168,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
     { location: vscode.ProgressLocation.Notification, title: subfolder ? `Pyrite: generating Java view for ${subfolder}` : 'Pyrite: generating Java view', cancellable: true },
     async (progress, token) => {
       const started = Date.now();
+      beginBusy();
       // The translation runs on a worker thread so a large project never freezes the extension host;
       // this thread only relays progress (at most every 100 ms) and the Cancel button.
       let reported = 0;
@@ -181,6 +205,7 @@ async function generateView(folderUri?: vscode.Uri): Promise<void> {
         void vscode.window.showErrorMessage(`Pyrite: generating the Java view failed: ${msg}`);
         return;
       } finally {
+        endBusy();
         cancelListener.dispose();
         symbolIndexFor(root, s.outputFolder).invalidateAll();
         void refreshStatusReport(root.uri);
@@ -209,8 +234,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
   const rel = relPath(root, pyUri.fsPath);
   if (isExcluded(rel, s.exclude)) return undefined;
   const translator = buildTranslator(root.uri.fsPath);
-  statusItem.text = STATUS_BUSY;
-  statusItem.show();
+  beginBusy();
   try {
     const basePackage = projectBasePackage(root.uri.fsPath, s.basePackage);
     const outcome = await mirrorFile(translator, root.uri.fsPath, rel, { outputFolder: s.outputFolder, basePackage, javadocMode: s.javadoc, documentTestCode: s.javadocTestCode, lombokStyle: s.lombok, lineWidth: s.lineWidth, invalidJava: s.invalidJava });
@@ -234,7 +258,7 @@ async function translateOne(pyUri: vscode.Uri, reveal: boolean, quiet = false): 
     void vscode.window.showErrorMessage(`Pyrite: failed to translate ${rel}: ${msg}`);
     return undefined;
   } finally {
-    statusItem.text = STATUS_IDLE;
+    endBusy();
   }
 }
 
@@ -355,8 +379,12 @@ const icon = (name: string) => `<span class="codicon codicon-${name}"></span>`;
 const REPORT_BUTTON = 'color:var(--vscode-button-foreground);background-color:var(--vscode-button-background);border-radius:4px;';
 const METER_FILL = 'background-color:var(--vscode-progressBar-background);border-radius:2px;';
 const METER_TRACK = 'background-color:var(--vscode-editorWidget-border);border-radius:2px;';
-/** Meter length in spaces; at hover font size this spans most of the report's width. */
-const METER_CELLS = 72;
+/**
+ * Meter length in spaces. A hover sizes to its widest content and the spaces cannot wrap, so this must
+ * be at least as wide as the report's widest row (about 330px; a small-font space is about 2.9px):
+ * then the meter sets the width and a full meter reaches the right edge.
+ */
+const METER_CELLS = 130;
 
 function titleRow(action: string): string {
   return `<table width="100%"><tr><td><strong>Pyrite — Java view</strong></td><td align="right">${action}</td></tr></table>\n\n`;
@@ -609,5 +637,7 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // nothing to clean up: subscriptions are disposed by VS Code
+  if (blinkTimer) clearInterval(blinkTimer);
+  blinkTimer = undefined;
+  // the rest is disposed by VS Code with the subscriptions
 }
