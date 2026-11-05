@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write # to attach the .vsix to a GitHub release
+  id-token: write # OIDC token for Marketplace trusted publishing
 
 jobs:
   publish:
@@ -38,9 +39,8 @@ jobs:
         run: npx --yes @vscode/vsce package --out pyrite.vsix
 
       - name: Publish to Visual Studio Marketplace
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx --yes @vscode/vsce publish --packagePath pyrite.vsix
+        # Trusted publishing: authenticates via the job's GitHub OIDC token (no PAT).
+        run: npx --yes @vscode/vsce@latest publish --oidc --packagePath pyrite.vsix
 
       - name: GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
