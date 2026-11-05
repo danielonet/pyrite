@@ -1,0 +1,49 @@
+name: Release
+
+# Publishes to the Visual Studio Marketplace when a version tag (vX.Y.Z) is pushed.
+# Release flow:  npm version patch   (bumps package.json, commits, tags vX.Y.Z)
+#                git push --follow-tags
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # to attach the .vsix to a GitHub release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      - name: Check tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PKG="v$(node -p "require('./package.json').version")"
+          if [ "$PKG" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $PKG" >&2
+            exit 1
+          fi
+
+      - run: npm test
+
+      - name: Package
+        run: npx --yes @vscode/vsce package --out pyrite.vsix
+
+      - name: Publish to Visual Studio Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --yes @vscode/vsce publish --packagePath pyrite.vsix
+
+      - name: GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" pyrite.vsix --generate-notes
